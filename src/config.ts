@@ -5,6 +5,7 @@ dotenv.config();
 const { 
   F95_LOGIN_USER,
   F95_LOGIN_PASSWORD,
+  DISCORD_COMMAND_CHANNEL_ID,
   DISCORD_TOKEN, 
   DISCORD_CLIENT_ID, 
   DISCORD_GUILD_ID, 
@@ -22,6 +23,7 @@ if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DISCORD_GUILD_ID || !DISCORD_IMAGES
 export const config = {
   F95_LOGIN_USER: process.env.F95_LOGIN_USER as string,
   F95_LOGIN_PASSWORD: process.env.F95_LOGIN_PASSWORD as string,
+  DISCORD_COMMAND_CHANNEL_ID: process.env.DISCORD_COMMAND_CHANNEL_ID as string,
   DISCORD_TOKEN: process.env.DISCORD_TOKEN as string,
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID as string,
   DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID as string,

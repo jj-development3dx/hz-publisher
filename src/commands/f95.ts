@@ -298,6 +298,11 @@ async function sendToChannel(interaction: CommandInteraction, channelId: string,
 
 export async function execute(interaction: CommandInteraction): Promise<void> {
   try {
+    if (interaction.channel?.id !== config.DISCORD_COMMAND_CHANNEL_ID) {
+      await interaction.editReply("Este comando solo puede ser usado en el canal de comandos.");
+      return;
+    }
+    
     await interaction.deferReply();
     
     const url = interaction.options.get("url")?.value as string;
