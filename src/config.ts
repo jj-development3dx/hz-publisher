@@ -1,0 +1,34 @@
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const { 
+  F95_LOGIN_USER,
+  F95_LOGIN_PASSWORD,
+  DISCORD_TOKEN, 
+  DISCORD_CLIENT_ID, 
+  DISCORD_GUILD_ID, 
+  DISCORD_IMAGES_CHANNEL_ID,
+  DISCORD_FREE_PC_CHANNEL_ID,
+  DISCORD_FREE_MOBILE_CHANNEL_ID,
+  DISCORD_PREMIUM_PC_CHANNEL_ID,
+  DISCORD_PREMIUM_MOBILE_CHANNEL_ID
+} = process.env;
+
+if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DISCORD_GUILD_ID || !DISCORD_IMAGES_CHANNEL_ID) {
+  throw new Error("Missing environment variables");
+}
+
+export const config = {
+  F95_LOGIN_USER: process.env.F95_LOGIN_USER as string,
+  F95_LOGIN_PASSWORD: process.env.F95_LOGIN_PASSWORD as string,
+  DISCORD_TOKEN: process.env.DISCORD_TOKEN as string,
+  DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID as string,
+  DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID as string,
+  DISCORD_IMAGES_CHANNEL_ID: process.env.DISCORD_IMAGES_CHANNEL_ID as string,
+  DISCORD_FREE_PC_CHANNEL_ID: process.env.DISCORD_FREE_PC_CHANNEL_ID as string,
+  DISCORD_FREE_MOBILE_CHANNEL_ID: process.env.DISCORD_FREE_MOBILE_CHANNEL_ID as string,
+  DISCORD_PREMIUM_PC_CHANNEL_ID: process.env.DISCORD_PREMIUM_PC_CHANNEL_ID as string,
+  DISCORD_PREMIUM_MOBILE_CHANNEL_ID: process.env.DISCORD_PREMIUM_MOBILE_CHANNEL_ID as string,
+  DEBUG_MODE: process.env.DEBUG_MODE === 'true' || false
+}; 

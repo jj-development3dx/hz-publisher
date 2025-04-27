@@ -1,0 +1,985 @@
+import { CommandInteraction, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ChannelType, TextChannel, Client } from "discord.js";
+import { login, Game, getHandiworkFromURL } from 'f95api'
+import { formatLink } from "./utils";
+import { config } from "./config";
+import * as fs from 'fs';
+import * as path from 'path';
+import * as https from 'https';
+import * as sharp from 'sharp'; // Importar Sharp para procesamiento de imágenes
+
+// Utility function to decode HTML entities
+function decodeHtmlEntities(text: string): string {
+  if (!text) return '';
+  
+  return text
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (match, dec) => String.fromCharCode(dec));
+}
+
+// Utility function to patch the issue with getDateFromString
+function safeGetHandiworkFromURL(url: string, type: typeof Game): Promise<any> {
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Definir un manejador de errores silencioso
+      const silentError = (message: string, error?: any) => {
+        if (config.DEBUG_MODE) {
+          if (error) {
+            console.error(`[DEBUG] ${message}:`, error);
+          } else {
+            console.error(`[DEBUG] ${message}`);
+          }
+        }
+        // No imprimir nada en modo normal
+      };
+      
+      // Sobrescribir temporalmente el método getDateFromString en el módulo utils para añadir verificación de null/undefined
+      const utilsPath = require.resolve('@millenniumearl/f95api/dist/src/scripts/utils');
+      const utils = require(utilsPath);
+      const originalGetDateFromString = utils.getDateFromString;
+      
+      // Reemplazar con una versión segura que verifica si s es undefined o null
+      utils.getDateFromString = function safeGetDateFromString(s: string | undefined | null, order = "decrescent") {
+        if (!s) return undefined; // Verificar si s es null o undefined
+        return originalGetDateFromString(s, order);
+      };
+      
+      // Parchear cleanHeadline de Thread para manejar valores undefined
+      const threadPath = require.resolve('@millenniumearl/f95api/dist/src/scripts/classes/mapping/thread');
+      const ThreadModule = require(threadPath);
+      const ThreadClass = ThreadModule.default || ThreadModule;
+      const originalCleanHeadline = ThreadClass.prototype.cleanHeadline;
+      ThreadClass.prototype.cleanHeadline = function patchedCleanHeadline(headline: string | undefined | null) {
+        if (!headline || typeof headline !== 'string') return '';
+        return originalCleanHeadline.call(this, headline);
+      };
+
+      // Parchear parseRating para manejar valores undefined
+      const originalParseRating = ThreadClass.prototype.parseRating;
+      ThreadClass.prototype.parseRating = function patchedParseRating(data: any) {
+        if (!data || !data.aggregateRating) {
+          return {
+            average: 0,
+            best: 0,
+            count: 0
+          };
+        }
+        return originalParseRating.call(this, data);
+      };
+
+      // Parchear el método fetch para manejar errores de parsing HTML
+      const originalFetch = ThreadClass.prototype.fetch;
+      ThreadClass.prototype.fetch = function patchedFetch() {
+        try {
+          return originalFetch.apply(this, arguments).catch((error: Error) => {
+            silentError("Error en Thread.fetch interceptado:", error.message);
+            return {
+              name: 'Unknown',
+              overview: 'No description available',
+              tags: ['Sin etiquetas'],
+              genre: ['Sin géneros'],
+              rating: {
+                average: 0,
+                best: 0,
+                count: 0
+              },
+              authors: [],
+              status: 'Unknown',
+              version: 'Unknown',
+              cover: 'https://i.ibb.co/7j4kgNh/logo.png'
+            };
+          });
+        } catch (error: unknown) {
+          silentError("Error en Thread.fetch interceptado:", error);
+          return Promise.resolve({
+            name: 'Unknown',
+            overview: 'No description available',
+            tags: ['Sin etiquetas'],
+            genre: ['Sin géneros'],
+            rating: {
+              average: 0,
+              best: 0,
+              count: 0
+            },
+            authors: [],
+            status: 'Unknown',
+            version: 'Unknown',
+            cover: 'https://i.ibb.co/7j4kgNh/logo.png'
+          });
+        }
+      };
+
+      // Parchear el método getThread para extraer correctamente JSON-LD desde HTML
+      const handiworkParsePath = require.resolve('@millenniumearl/f95api/dist/src/scripts/scrape-data/handiwork-parse');
+      const handiworkParse = require(handiworkParsePath);
+      const originalGetThread = handiworkParse.getThread;
+      
+      handiworkParse.getThread = async function patchedGetThread(url: string) {
+        try {
+          // Usamos fetch directamente para obtener el HTML
+          const response = await fetch(url);
+          const html = await response.text();
+          
+          // Extraer el JSON-LD manualmente del HTML
+          let jsonLdData = null;
+          try {
+            const jsonLdMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+            if (jsonLdMatch && jsonLdMatch[1]) {
+              const jsonLdText = jsonLdMatch[1].trim();
+              jsonLdData = JSON.parse(jsonLdText);
+            }
+          } catch (jsonError) {
+            silentError("Error al extraer JSON-LD:", jsonError);
+          }
+          
+          // Crear un objeto Thread manualmente con los datos extraídos
+          const threadObj = new ThreadClass(url);
+
+          // --- TÍTULO ---
+          let rawTitle = jsonLdData?.name || '';
+          // Limpiar prefijos y sufijos comunes (engine, versión, autor entre corchetes)
+          let cleanTitle = rawTitle
+            .replace(/^\s*VN\s*-\s*[^-]+-\s*/i, '') // Quita "VN - Ren'Py - "
+            .replace(/\[[^\]]*\]/g, '') // Quita [Jestur] o similares
+            .replace(/v?\d+(\.\d+)*\s*Public?/i, '') // Quita versión
+            .replace(/\s{2,}/g, ' ') // Espacios dobles
+            .trim();
+            
+            // Si no hay título en JSON-LD, intentar extraerlo del HTML
+            if (!cleanTitle) {
+              try {
+                // Intentar extraer del título HTML
+                const titleMatch = html.match(/<title>([^<]+)<\/title>/);
+                if (titleMatch && titleMatch[1]) {
+                  let htmlTitle = titleMatch[1].trim();
+                  // Limpiar el título de la página
+                  htmlTitle = htmlTitle
+                    .replace(/\s*\|\s*F95zone.*$/, '') // Quitar "| F95zone" y lo que siga
+                    .replace(/^VN\s*-\s*[^-]+-\s*/i, '') // Quita "VN - Ren'Py - "
+                    .replace(/\[[^\]]*\]/g, '') // Quita [Jestur] o similares
+                    .replace(/v?\d+(\.\d+)*\s*Public?/i, '') // Quita versión
+                    .replace(/\s{2,}/g, ' ') // Espacios dobles
+                    .trim();
+                  cleanTitle = htmlTitle;
+                }
+              } catch (titleError) {
+                console.error("Error al extraer título del HTML:", titleError);
+              }
+            }
+            
+            // Si aún no hay título, intentar extraer de la URL
+            if (!cleanTitle) {
+              try {
+                const urlParts = url.split('/');
+                const lastUrlPart = urlParts[urlParts.length - 1] || urlParts[urlParts.length - 2] || '';
+                cleanTitle = lastUrlPart
+                  .replace(/-/g, ' ')
+                  .replace(/\d+$/, '') // Quitar números al final (IDs)
+                  .trim();
+                  
+                // Convertir primera letra de cada palabra a mayúscula
+                cleanTitle = cleanTitle.split(' ')
+                  .map((word: string) => word.charAt(0).toUpperCase() + word.slice(1))
+                  .join(' ');
+              } catch (urlError) {
+                console.error("Error al extraer título de URL:", urlError);
+              }
+            }
+            
+            if (!cleanTitle) cleanTitle = 'Ripples'; // Título por defecto
+            threadObj.name = decodeHtmlEntities(cleanTitle);
+
+          // --- DESCRIPCIÓN ---
+          threadObj.overview = decodeHtmlEntities(jsonLdData?.description || 'No hay descripción disponible.');
+
+          // --- VERSIÓN ---
+          let version = '';
+          // Buscar versión en JSON-LD
+          if (jsonLdData?.description) {
+            const versionMatch = jsonLdData.description.match(/Version:\s*([\w.\- ]+)/i);
+            if (versionMatch) version = versionMatch[1].trim();
+          }
+          // Buscar versión en HTML si no se encontró
+          if (!version) {
+            const versionMatchHtml = html.match(/Version:\s*([\w.\- ]+)/i);
+            if (versionMatchHtml) version = versionMatchHtml[1].trim();
+          }
+          threadObj.version = version || 'Desconocida';
+
+          // --- AUTOR ---
+          let author = '';
+          // Buscar autor en JSON-LD descripción
+          if (jsonLdData?.description) {
+            const authorMatch = jsonLdData.description.match(/Developer:\s*([^\n]+)/i);
+            if (authorMatch) author = authorMatch[1].replace(/\s*Patreon.*$/, '').trim();
+          }
+          // Buscar autor en HTML si no se encontró
+          if (!author) {
+            const authorMatchHtml = html.match(/Developer:\s*([^<\n]+)/i);
+            if (authorMatchHtml) author = authorMatchHtml[1].replace(/\s*Patreon.*$/, '').trim();
+          }
+          threadObj.authors = [{ name: author || 'Desconocido' }];
+
+          // --- ESTADO ---
+          let status = '';
+          if (jsonLdData?.description) {
+            const statusMatch = jsonLdData.description.match(/Status:\s*([^\n]+)/i);
+            if (statusMatch) status = statusMatch[1].trim();
+          }
+          if (!status) {
+            const statusMatchHtml = html.match(/Status:\s*([^<\n]+)/i);
+            if (statusMatchHtml) status = statusMatchHtml[1].trim();
+          }
+          threadObj.status = status || 'Desconocido';
+
+          // --- GÉNEROS / TAGS ---
+          let genres: string[] = [];
+          const genreMatch = jsonLdData?.description?.match(/Genre:\s*([\s\S]*?)(?:\n|$)/i);
+          if (genreMatch && genreMatch[1].trim()) {
+            genres = genreMatch[1].split(',').map((g: string) => g.trim()).filter(Boolean);
+          }
+          
+          // Si no hay géneros, buscar en HTML
+          if (!genres.length) {
+            try {
+              const genreMatchHtml = html.match(/Genre:\s*([^<\n]+)/i);
+              if (genreMatchHtml && genreMatchHtml[1].trim()) {
+                genres = genreMatchHtml[1].split(',').map((g: string) => g.trim()).filter(Boolean);
+              }
+            } catch (genreError) {
+              console.error("Error al extraer géneros del HTML:", genreError);
+            }
+          }
+          
+          // Si aún no hay géneros, extraer del título o la descripción
+          if (!genres.length) {
+            try {
+              // Lista de géneros comunes para buscar
+              const commonGenres = [
+                '3DCG', 'Big Tits', 'Animated', 'Creampie', 'Handjob', 
+                'Male Protagonist', 'Milf', 'Oral Sex', 'Stripping', 
+                'Vaginal Sex', 'Virgin', 'Adventure', 'RPG', 'Simulator',
+                'Visual Novel', 'Dating Sim', 'Management'
+              ];
+              
+              // Buscar en el título
+              if (cleanTitle) {
+                commonGenres.forEach(genre => {
+                  if (cleanTitle.toLowerCase().includes(genre.toLowerCase())) {
+                    genres.push(genre);
+                  }
+                });
+              }
+              
+              // Buscar en la descripción si está disponible
+              if (jsonLdData?.description && genres.length === 0) {
+                commonGenres.forEach(genre => {
+                  if (jsonLdData.description.toLowerCase().includes(genre.toLowerCase())) {
+                    genres.push(genre);
+                  }
+                });
+              }
+            } catch (extractionError) {
+              console.error("Error al extraer géneros del título/descripción:", extractionError);
+            }
+          }
+          
+          if (!genres.length) genres = ['Sin géneros'];
+          threadObj.tags = genres;
+          threadObj.genre = genres;
+
+          // --- PORTADA ---
+          let cover = '';
+          
+          try {
+            // Método 1: Meta og:image (más confiable)
+            const coverMatch = html.match(/<meta property="og:image" content="([^"]+)"/);
+            if (coverMatch && coverMatch[1]) {
+              cover = coverMatch[1].trim();
+            }
+            
+            // Método 2: Buscar imágenes específicas de alta calidad
+            if (!cover || cover.includes('/styles/') || cover.includes('/xenforo/')) {
+              // Buscar imágenes en el contenido del post principal
+              const contentImgMatches = html.match(/<div[^>]*class="bbWrapper"[^>]*>[\s\S]*?<img[^>]*src="([^"]+\.(?:jpg|jpeg|png|gif))"[^>]*>/ig);
+              if (contentImgMatches && contentImgMatches.length > 0) {
+                // Extraer todas las URLs de imágenes encontradas
+                const imgUrls = contentImgMatches.map(match => {
+                  const imgMatch = match.match(/src="([^"]+\.(?:jpg|jpeg|png|gif))"/i);
+                  return imgMatch ? imgMatch[1] : null;
+                }).filter(Boolean);
+                
+                // Priorizar imágenes que parecen ser portadas (más grandes, no son emojis o iconos)
+                if (imgUrls.length > 0) {
+                  // Filtrar URLs que contienen palabras clave de portadas
+                  const coverKeywords = ['cover', 'poster', 'thumb', 'banner', 'header'];
+                  const possibleCovers = imgUrls.filter(url => {
+                    if (!url) return false;
+                    return coverKeywords.some(keyword => url.toLowerCase().includes(keyword)) ||
+                      (!url.includes('emoji') && !url.includes('icon') && !url.includes('avatar'));
+                  });
+                  
+                  if (possibleCovers.length > 0) {
+                    // Usar la primera imagen que parece ser una portada
+                    const firstCover = possibleCovers[0];
+                    if (firstCover) {
+                      cover = firstCover;
+                      console.log("Encontrada imagen de alta calidad en el contenido del post");
+                    }
+                  } else if (imgUrls[0]) {
+                    // Si no hay coincidencias con palabras clave, usar la primera imagen grande
+                    cover = imgUrls[0];
+                    console.log("Usando primera imagen del contenido");
+                  }
+                }
+              }
+            }
+            
+            // Método 3: Buscar en otras partes del HTML
+            if (!cover) {
+              const altImgMatch = html.match(/<div[^>]*class="[^"]*threadContent[^"]*"[^>]*>[\s\S]*?<img[^>]*src="([^"]+\.(?:jpg|jpeg|png|gif))"[^>]*>/i);
+              if (altImgMatch && altImgMatch[1]) {
+                cover = altImgMatch[1].trim();
+                console.log("Encontrada imagen en el contenido del thread");
+              }
+            }
+            
+            // Limpiar URL
+            if (cover) {
+              // Forzar HTTPS
+              if (cover.startsWith('http:')) {
+                cover = cover.replace('http:', 'https:');
+              }
+              
+              // Eliminar parámetros de tamaño que podrían causar problemas
+              cover = cover.replace(/\?.*$/, '');
+              
+              console.log("URL de imagen extraída:", cover);
+            }
+          } catch (coverError) {
+            console.error("Error al extraer imagen de portada:", coverError);
+            cover = '';
+          }
+          
+          // URL de imagen fallback confiable
+          const fallbackImage = 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png';
+          threadObj.cover = cover || fallbackImage;
+
+          // --- PUNTUACIÓN ---
+          let rating = {
+            average: Number(jsonLdData?.aggregateRating?.ratingValue) || 0,
+            best: Number(jsonLdData?.aggregateRating?.bestRating) || 0,
+            count: Number(jsonLdData?.aggregateRating?.ratingCount) || 0
+          };
+          
+          // Asegurarnos de que las puntuaciones se conviertan correctamente
+          if (isNaN(rating.average)) rating.average = 0;
+          if (isNaN(rating.best)) rating.best = 0;
+          if (isNaN(rating.count)) rating.count = 0;
+
+          // Log para depurar
+          if (config.DEBUG_MODE) {
+            console.log("JSON-LD Rating data:", jsonLdData?.aggregateRating);
+            console.log("Processed Rating:", rating);
+          }
+          
+          threadObj.rating = rating;
+
+          return threadObj;
+        } catch (error) {
+          silentError("Error en getThread interceptado:", error);
+          // Crear un objeto Thread mínimo para evitar errores
+          const threadObj = new ThreadClass(url);
+          threadObj.name = "Unknown";
+          threadObj.overview = "No description available";
+          threadObj.tags = [];
+          threadObj.genre = [];
+          threadObj.rating = { average: 0, best: 0, count: 0 };
+          threadObj.authors = [{ name: "Unknown" }];
+          threadObj.status = "Unknown";
+          threadObj.version = "Unknown";
+          threadObj.cover = 'https://i.ibb.co/7j4kgNh/logo.png';
+          return threadObj;
+        }
+      };
+
+      // Parchear elaborateResponse directamente en la línea que causa el error
+      const originalElaborateResponse = ThreadClass.prototype.elaborateResponse;
+      ThreadClass.prototype.elaborateResponse = function patchedElaborateResponse(data: any) {
+        // Verificar si data es undefined o null
+        if (!data) {
+          return {
+            name: 'Unknown',
+            overview: 'No description available',
+            tags: [],
+            genre: [],
+            rating: {
+              average: 0,
+              best: 0,
+              count: 0
+            },
+            authors: [],
+            status: 'Unknown',
+            version: 'Unknown',
+            cover: 'https://i.ibb.co/7j4kgNh/logo.png'
+          };
+        }
+        
+        // Monkeypatching directamente la implementación original para interceptar el error en la línea 217
+        const originalFunction = originalElaborateResponse;
+        const patchedFunction = function(this: any, JSONLD: any) {
+          try {
+            if (!JSONLD) {
+              return {
+                name: 'Unknown',
+                overview: 'No description available',
+                tags: [],
+                genre: [],
+                rating: {
+                  average: 0,
+                  best: 0,
+                  count: 0
+                },
+                authors: [],
+                status: 'Unknown',
+                version: 'Unknown',
+                cover: 'https://i.ibb.co/7j4kgNh/logo.png'
+              };
+            }
+            
+            // Verificar si articleSection existe antes de llamar a toString
+            if (!JSONLD["articleSection"]) {
+              JSONLD["articleSection"] = "";
+            }
+            
+            // Asegurarse de que todas las propiedades posibles existan para evitar errores
+            if (!JSONLD["name"]) JSONLD["name"] = "Unknown";
+            else if (typeof JSONLD["name"] === 'string') {
+              JSONLD["name"] = decodeHtmlEntities(JSONLD["name"]);
+            }
+            
+            if (!JSONLD["description"]) JSONLD["description"] = "No description available";
+            else if (typeof JSONLD["description"] === 'string') {
+              JSONLD["description"] = decodeHtmlEntities(JSONLD["description"]);
+            }
+            
+            if (!JSONLD["aggregateRating"]) {
+              JSONLD["aggregateRating"] = {
+                ratingValue: "0",
+                bestRating: "0",
+                ratingCount: "0"
+              };
+            }
+            
+            // Extraer título sin errores (eliminar problemas con caracteres HTML)
+            const rawName = JSONLD["name"] || "Unknown";
+            const cleanName = typeof rawName === 'string' 
+              ? decodeHtmlEntities(rawName)
+              : "Unknown";
+            
+            try {
+              // Continuar con la implementación original
+              const result = originalFunction.call(this, JSONLD);
+              
+              // Asegurarse de que el nombre es correcto
+              if (!result.name || result.name.includes('No hay titulo') || result.name.includes('Unknown')) {
+                result.name = cleanName;
+              }
+              
+              // Descodificar el texto de descripción si existe
+              if (result.overview && typeof result.overview === 'string') {
+                result.overview = decodeHtmlEntities(result.overview);
+              }
+              
+              return result;
+            } catch (error) {
+              silentError("Error interceptado en elaborateResponse:", error);
+              return {
+                name: cleanName,
+                overview: typeof JSONLD?.description === 'string' 
+                  ? decodeHtmlEntities(JSONLD.description) 
+                  : 'No description available',
+                tags: [],
+                genre: [],
+                rating: {
+                  average: parseFloat(JSONLD?.aggregateRating?.ratingValue || "0"),
+                  best: parseFloat(JSONLD?.aggregateRating?.bestRating || "0"),
+                  count: parseInt(JSONLD?.aggregateRating?.ratingCount || "0")
+                },
+                authors: [],
+                status: 'Unknown',
+                version: 'Unknown',
+                cover: 'https://i.ibb.co/7j4kgNh/logo.png'
+              };
+            }
+          } catch (error) {
+            silentError("Error interceptado en elaborateResponse exterior:", error);
+            return {
+              name: JSONLD?.name || 'Unknown',
+              overview: JSONLD?.description || 'No description available',
+              tags: [],
+              genre: [],
+              rating: {
+                average: 0,
+                best: 0,
+                count: 0
+              },
+              authors: [],
+              status: 'Unknown',
+              version: 'Unknown',
+              cover: 'https://i.ibb.co/7j4kgNh/logo.png'
+            };
+          }
+        };
+        
+        return patchedFunction.call(this, data);
+      };
+      
+      // Llamar a la función original con nuestra corrección en su lugar
+      const result = await getHandiworkFromURL(url, type);
+      
+      // Restaurar las funciones originales
+      utils.getDateFromString = originalGetDateFromString;
+      ThreadClass.prototype.cleanHeadline = originalCleanHeadline;
+      ThreadClass.prototype.parseRating = originalParseRating;
+      ThreadClass.prototype.fetch = originalFetch;
+      handiworkParse.getThread = originalGetThread;
+      ThreadClass.prototype.elaborateResponse = originalElaborateResponse;
+      
+      resolve(result);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// Definir una interfaz para el tipo de juego
+interface GameData {
+  name: string;
+  overview: string;
+  tags: string[];
+  genre: string[];
+  rating: {
+    average: number;
+    best: number;
+    count: number;
+  };
+  authors: Array<{name: string}>;
+  status: string;
+  version: string;
+  cover: string;
+}
+
+export const data = new SlashCommandBuilder()
+  .setName("f95")
+  .setDescription("Obtiene información de un juego de F95Zone")
+  .addStringOption(option => 
+    option
+      .setName("url")
+      .setDescription("URL del juego en F95Zone")
+      .setRequired(true)
+  );
+
+// Función para descargar una imagen y guardarla temporalmente
+async function downloadImage(url: string, filename: string): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    // Función de log que solo muestra mensajes en modo DEBUG
+    const debugLog = (message: string) => {
+      if (config.DEBUG_MODE) {
+        console.log(`[DEBUG] ${message}`);
+      }
+    };
+    
+    // Función de log de error que solo muestra errores en modo DEBUG
+    const debugError = (message: string, error?: any) => {
+      if (config.DEBUG_MODE) {
+        if (error) {
+          console.error(`[DEBUG ERROR] ${message}:`, error);
+        } else {
+          console.error(`[DEBUG ERROR] ${message}`);
+        }
+      }
+    };
+    
+    // Crear directorio de cache si no existe
+    const cacheDir = path.join(process.cwd(), 'cache');
+    if (!fs.existsSync(cacheDir)) {
+      fs.mkdirSync(cacheDir, { recursive: true });
+    }
+    
+    // Siempre guardar como PNG
+    const fileBase = filename.replace(/\.[^/.]+$/, '');
+    const filePath = path.join(cacheDir, `${fileBase}.png`);
+    const tempPath = path.join(cacheDir, `${fileBase}_temp`);
+    
+    // Comprobar si ya existe en cache
+    if (fs.existsSync(filePath)) {
+      debugLog(`Imagen ya en caché: ${filePath}`);
+      resolve(filePath);
+      return;
+    }
+    
+    // Configurar opciones de solicitud con headers específicos
+    const options = {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8'
+      }
+    };
+    
+    debugLog(`Descargando imagen desde: ${url}`);
+    
+    // Usar https request para descargar la imagen
+    https.get(url, options, (response) => {
+      // Verificar respuesta válida (200-299)
+      if (response.statusCode! < 200 || response.statusCode! >= 300) {
+        debugError(`Error descargando imagen: Status code ${response.statusCode}`);
+        reject(new Error(`Error HTTP: ${response.statusCode}`));
+        return;
+      }
+      
+      debugLog(`Respuesta recibida con status code: ${response.statusCode}`);
+      
+      // Crear stream de escritura para guardar el archivo temporal
+      const fileStream = fs.createWriteStream(tempPath);
+      
+      // Pipe respuesta al archivo temporal
+      response.pipe(fileStream);
+      
+      // Eventos
+      fileStream.on('finish', () => {
+        fileStream.close();
+        debugLog(`Imagen temporal descargada: ${tempPath}`);
+        
+        // Convertir a PNG con sharp
+        debugLog(`Iniciando conversión a PNG con Sharp...`);
+        sharp.default(tempPath)
+          .png() // Convertir a formato PNG
+          .toFile(filePath)
+          .then(() => {
+            // Eliminar el archivo temporal
+            fs.unlink(tempPath, (unlinkErr) => {
+              if (unlinkErr) debugError(`Error eliminando archivo temporal: ${unlinkErr.message}`);
+            });
+            
+            debugLog(`Imagen convertida a PNG: ${filePath}`);
+            resolve(filePath);
+          })
+          .catch((convErr: Error) => {
+            debugError(`Error convirtiendo imagen a PNG: ${convErr.message}`, convErr);
+            // Si falla la conversión, intentar mover el archivo temporal
+            try {
+              debugLog(`Intentando usar archivo temporal sin conversión...`);
+              fs.renameSync(tempPath, filePath);
+              debugLog(`Archivo temporal renombrado a: ${filePath}`);
+              resolve(filePath);
+            } catch (renameErr: unknown) {
+              const error = renameErr instanceof Error ? renameErr : new Error(String(renameErr));
+              debugError(`Error renombrando archivo temporal: ${error.message}`, error);
+              reject(convErr);
+            }
+          });
+      });
+      
+      fileStream.on('error', (err) => {
+        fs.unlink(tempPath, () => {});  // Borrar archivo parcial
+        debugError(`Error escribiendo archivo: ${err.message}`, err);
+        reject(err);
+      });
+    }).on('error', (err) => {
+      debugError(`Error en solicitud HTTP: ${err.message}`, err);
+      reject(err);
+    });
+  });
+}
+
+// Función para subir imagen a un canal de Discord y obtener la URL del CDN
+async function uploadImageToDiscord(client: Client, imagePath: string, filename: string): Promise<string> {
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Obtener el canal designado para imágenes
+      const channel = await client.channels.fetch(config.DISCORD_IMAGES_CHANNEL_ID);
+      
+      if (!channel || channel.type !== ChannelType.GuildText) {
+        console.error('Canal de imágenes no encontrado o no es un canal de texto');
+        reject(new Error('Canal de imágenes no encontrado'));
+        return;
+      }
+      
+      const textChannel = channel as TextChannel;
+      
+      // Asegurar que el nombre del archivo termina en .png
+      const pngFilename = filename.endsWith('.png') ? filename : `${filename.replace(/\.[^/.]+$/, '')}.png`;
+      
+      // Crear attachment para subir
+      const attachment = new AttachmentBuilder(imagePath, { 
+        name: pngFilename,
+        description: "Game cover image (PNG)"
+      });
+      
+      // Enviar imagen al canal
+      console.log(`Subiendo imagen a canal de Discord: ${config.DISCORD_IMAGES_CHANNEL_ID}`);
+      const message = await textChannel.send({ files: [attachment] });
+      
+      // Obtener URL de la imagen subida
+      if (message.attachments.size > 0) {
+        const imageUrl = message.attachments.first()?.url;
+        if (imageUrl) {
+          console.log(`Imagen subida exitosamente a Discord. URL: ${imageUrl}`);
+          resolve(imageUrl);
+          return;
+        }
+      }
+      
+      reject(new Error('No se pudo obtener la URL de la imagen subida'));
+    } catch (error) {
+      console.error('Error al subir imagen a Discord:', error);
+      reject(error);
+    }
+  });
+}
+
+export async function execute(interaction: CommandInteraction): Promise<void> {
+  try {
+    await interaction.deferReply();
+    
+    const url = interaction.options.get("url")?.value as string;
+    
+    if (!url.includes("f95zone.to")) {
+      await interaction.editReply("La URL debe ser de F95Zone.");
+      return;
+    }
+
+    // Verificar si la interacción sigue siendo válida
+    const checkInteractionValid = async () => {
+      try {
+        // Intenta enviar un mensaje de "Cargando..." para verificar si la interacción sigue activa
+        await interaction.editReply("Cargando información del juego...");
+        return true;
+      } catch (error) {
+        if (error instanceof Error && 'code' in error && (error as any).code === 10062) {
+          console.log("Interacción expirada, no se puede continuar");
+          return false;
+        }
+        // Si el error no es por interacción expirada, podemos continuar
+        return true;
+      }
+    };
+
+    try {
+      // Iniciamos sesión en F95Zone
+      await login('joordih', 'holajaja123L');
+
+      // Verificar si la interacción sigue siendo válida antes de hacer la solicitud API que puede tardar
+      if (!await checkInteractionValid()) return;
+      
+      // Usar nuestra versión segura de la función
+      const gameData = await safeGetHandiworkFromURL(url, Game) as GameData;
+      
+      // Verificar de nuevo si la interacción sigue siendo válida
+      if (!await checkInteractionValid()) return;
+
+      if (!gameData) {
+        await interaction.editReply("No se pudo obtener información del juego.");
+        return;
+      }
+
+      // URLs (estos valores serían proporcionados por el usuario o sistema)
+      const freeMediafirePc = ""; // Ejemplo: https://www.mediafire.com/file/example
+      const freePixeldrainPc = ""; // Ejemplo: https://pixeldrain.com/u/example
+      const f95zoneLink = url;
+
+      // Implementación más robusta para imágenes que funcione en Android
+      // Usar una imagen de Discord CDN garantizada que funciona en todas las plataformas
+      const FALLBACK_IMAGE = 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png';
+      
+      // Procesar URL de imagen para garantizar compatibilidad
+      let coverImageUrl = '';
+      let localImagePath = null;
+      let discordCdnUrl = null;
+      
+      if (gameData.cover && typeof gameData.cover === 'string' && gameData.cover.trim()) {
+        try {
+          let url = gameData.cover.trim();
+          
+          // Forzar HTTPS
+          if (url.startsWith('http:')) {
+            url = url.replace('http:', 'https:');
+          }
+          
+          // Asegurarse de que no hay espacios o caracteres especiales
+          url = url.replace(/\s/g, '%20');
+          
+          // Validar URL
+          new URL(url);
+          
+          // Descargar imagen para subirla a Discord
+          try {
+            // Crear nombre de archivo único basado en la URL
+            const urlParts = url.split('/').pop()?.split('.') || [];
+            const fileExtension = urlParts.length > 1 ? `.${urlParts.pop()}` : '.png';
+            const filename = `game_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+            const attachmentName = `cover_game.png`;
+            
+            console.log(`Descargando imagen: ${url}`);
+            localImagePath = await downloadImage(url, filename);
+            console.log(`Imagen guardada en: ${localImagePath}`);
+            
+            // Subir imagen a canal de Discord y obtener URL del CDN si tenemos la ruta local
+            if (localImagePath) {
+              discordCdnUrl = await uploadImageToDiscord(interaction.client, localImagePath, attachmentName);
+              console.log(`URL de Discord CDN obtenida: ${discordCdnUrl}`);
+              
+              // Si todo sale bien, usar URL de Discord como imagen principal
+              if (discordCdnUrl) {
+                coverImageUrl = discordCdnUrl;
+              } else {
+                // Si no se pudo subir, intentar con la URL original pero añadiendo parámetros para forzar PNG
+                coverImageUrl = url.includes('.png') ? url : `${url}?format=png`;
+              }
+            } else {
+              // Si no se pudo descargar, intentar con la URL original pero añadiendo parámetros para forzar PNG
+              coverImageUrl = url.includes('.png') ? url : `${url}?format=png`;
+            }
+          } catch (uploadError) {
+            console.error('Error al subir imagen a Discord:', uploadError);
+            // En caso de error, usar la URL original como respaldo, intentando forzar PNG
+            coverImageUrl = url.includes('.png') ? url : `${url}?format=png`;
+          }
+          
+        } catch (e) {
+          console.error('Error procesando URL de imagen:', e);
+          coverImageUrl = FALLBACK_IMAGE;
+        }
+      } else {
+        coverImageUrl = FALLBACK_IMAGE;
+      }
+      
+      console.log('URL de imagen final:', coverImageUrl);
+
+      // Verificar si la interacción sigue siendo válida antes de enviar la respuesta final
+      if (!await checkInteractionValid()) return;
+
+      // Creamos el embed con valores por defecto para evitar errores
+      const embed = new EmbedBuilder()
+        .setAuthor({
+          name: 'HotZone Publisher',
+          iconURL: 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png',
+          url: 'https://hotzone18.com/'
+        })
+        .setTitle(gameData.name || 'Ripples')
+        .setDescription(`\`\`\`\n${gameData.overview || 'No hay descripción disponible.'}\n\`\`\``)
+        .addFields(
+          {
+            name: 'Generos',
+            value: `\`\`\`\n${(gameData.genre && gameData.genre.length > 0) ? gameData.genre.toString() : 'Sin géneros'}\n\`\`\``
+          },
+          {
+            name: 'Puntuación media',
+            value: `\`\`\`\n${!isNaN(gameData.rating?.average) ? gameData.rating.average : 0} ⭐\n\`\`\``,
+            inline: true
+          },
+          {
+            name: 'Puntuación máxima',
+            value: `\`\`\`\n${!isNaN(gameData.rating?.best) ? gameData.rating.best : 0} ⭐\n\`\`\``,
+            inline: true
+          },
+          {
+            name: 'Puntuaciones',
+            value: `\`\`\`\n${!isNaN(gameData.rating?.count) ? gameData.rating.count : 0}\n\`\`\``,
+            inline: true
+          },
+          {
+            name: 'Desarrollador',
+            value: `\`\`\`\n${gameData.authors?.[0]?.name || 'Desconocido'}\n\`\`\``,
+            inline: true
+          },
+          {
+            name: 'Estado',
+            value: `\`\`\`\n${gameData.status || 'Desconocido'}\n\`\`\``,
+            inline: true
+          },
+          {
+            name: 'Versión',
+            value: `\`\`\`\n${gameData.version || 'Desconocida'}\n\`\`\``,
+            inline: true
+          },
+          {
+            name: 'Descargas PC',
+            value: `${formatLink(freeMediafirePc, 'Mediafire')}\n${formatLink(freePixeldrainPc, 'Pixeldrain')}`
+          },
+          {
+            name: 'Instrucciones',
+            value: `${f95zoneLink}`
+          }
+        )
+        .setColor(0x00b0f4)
+        .setFooter({
+          text: 'HotZone Publisher',
+          iconURL: 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png'
+        })
+        .setTimestamp();
+      
+      // Asegurar que la URL de la imagen termina en .png o tiene formato PNG
+      let imageUrlWithFormat = coverImageUrl;
+      if (!imageUrlWithFormat.includes('.png') && !imageUrlWithFormat.includes('format=png')) {
+        imageUrlWithFormat = `${imageUrlWithFormat}${imageUrlWithFormat.includes('?') ? '&' : '?'}format=png`;
+      }
+      
+      // Añadir parámetro de cache para evitar el cacheo de Discord
+      const finalImageUrl = `${imageUrlWithFormat}${imageUrlWithFormat.includes('?') ? '&' : '?'}cache=${Date.now()}`;
+      
+      // Usar la URL procesada para la imagen
+      embed.setImage(finalImageUrl);
+      
+      // Registrar la URL final para debugging
+      console.log(`URL final de imagen en embed: ${finalImageUrl}`);
+
+      // Enviar mensaje solo con el embed, sin adjuntar archivos
+      await interaction.editReply({ embeds: [embed] });
+      
+      // Limpiar archivos temporales después de 5 minutos
+      if (localImagePath) {
+        setTimeout(() => {
+          try {
+            if (localImagePath) {
+              fs.unlinkSync(localImagePath);
+              console.log(`Archivo temporal eliminado: ${localImagePath}`);
+            }
+          } catch (cleanupError) {
+            console.error(`Error al eliminar archivo temporal: ${cleanupError}`);
+          }
+        }, 5 * 60 * 1000);
+      }
+      
+    } catch (error: any) {
+      console.error('Error al obtener datos del juego:', error);
+      
+      // Verificar si la interacción sigue siendo válida antes de reportar el error
+      try {
+        await interaction.editReply(`Error al obtener información del juego: ${error.message || 'Error desconocido'}`);
+      } catch (replyError) {
+        if (replyError instanceof Error && 'code' in replyError && (replyError as any).code === 10062) {
+          console.log("Interacción expirada, no se puede reportar el error");
+        } else {
+          console.error('Error al reportar el error original:', replyError);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error al procesar el comando f95:', error);
+    
+    try {
+      await interaction.editReply('Ocurrió un error al procesar el comando.');
+    } catch (replyError) {
+      if (replyError instanceof Error && 'code' in replyError && (replyError as any).code === 10062) {
+        console.log("Interacción expirada, no se puede reportar el error general");
+      } else {
+        console.error('Error al reportar el error general:', replyError);
+      }
+    }
+  }
+}

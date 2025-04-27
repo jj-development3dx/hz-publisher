@@ -1,0 +1,23 @@
+# Dirs
+.github/
+.vscode/
+test/
+coverage/
+src/
+
+# Files
+dist/tsconfig.tsbuildinfo
+CHANGELOG.md
+COOKIES.md
+tsconfig.json
+renovate.json
+.eslintignore
+.eslintrc
+.gitignore
+.gitattributes
+.env
+.prettierrc
+.dccache
+
+# Example files
+dist/src/example.*

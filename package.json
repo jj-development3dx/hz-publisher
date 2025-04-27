@@ -1,0 +1,31 @@
+{
+  "name": "hz-publish",
+  "version": "1.0.0",
+  "description": "Discord bot para publicar información de juegos desde F95Zone",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsup src/index.ts --minify"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "f95zone",
+    "typescript"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "f95api": "file:f95-api",
+    "sharp": "^0.34.1"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.2",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3"
+  }
+}

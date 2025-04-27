@@ -1,0 +1,10 @@
+# Directories
+dist/
+node_modules/
+.nyc_output/
+coverage
+
+# Files
+.env
+.dccache
+F95API_NPM_AUTH_TOKEN.txt
