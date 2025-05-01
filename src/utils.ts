@@ -72,7 +72,7 @@ export async function downloadImage(url: string, filename: string): Promise<stri
     const filePath = path.join(cacheDir, `${fileBase}.png`);
     const tempPath = path.join(cacheDir, `${fileBase}_temp`);
     
-    // Clean up potential leftover temp file
+   
     if (fs.existsSync(tempPath)) {
       try {
         fs.unlinkSync(tempPath);
@@ -92,9 +92,9 @@ export async function downloadImage(url: string, filename: string): Promise<stri
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-        'Referer': 'https://f95zone.to/' // Added referer as sometimes needed
+        'Referer': 'https://f95zone.to/'
       },
-      timeout: 15000 // 15 seconds timeout
+      timeout: 15000
     };
     
     debugLog(`Downloading image from: ${processedUrl}`);
@@ -102,9 +102,9 @@ export async function downloadImage(url: string, filename: string): Promise<stri
     const request = https.get(processedUrl, options, (response) => {
       if (response.statusCode !== 200) {
         debugError(`Error downloading image: Status code ${response.statusCode} for URL ${processedUrl}`);
-        // Consume response data to free up memory
+       
         response.resume();
-        resolve(null); // Resolve with null on download errors
+        resolve(null);
         return;
       }
       
@@ -115,10 +115,10 @@ export async function downloadImage(url: string, filename: string): Promise<stri
       response.pipe(fileStream);
       
       fileStream.on('finish', () => {
-        fileStream.close(async (closeErr) => { // Added async here
+        fileStream.close(async (closeErr) => {
           if (closeErr) {
             debugError(`Error closing file stream for ${tempPath}`, closeErr);
-            // Try to clean up temp file even if closing failed
+           
             try { fs.unlinkSync(tempPath); } catch (e) { /* ignore */ }
             resolve(null);
             return;
@@ -137,8 +137,8 @@ export async function downloadImage(url: string, filename: string): Promise<stri
 
           } catch (convErr: any) {
             debugError(`Error converting image to PNG: ${convErr.message}`, convErr);
-            // If conversion fails, try resolving with the original temp file
-            // (renaming it to the final path), as Discord might handle it.
+           
+           
             try {
               debugLog(`Conversion failed. Trying to use temp file: ${tempPath}`);
               fs.renameSync(tempPath, filePath);
@@ -146,10 +146,10 @@ export async function downloadImage(url: string, filename: string): Promise<stri
               resolve(filePath); 
             } catch (renameErr: any) {
               debugError(`Failed to rename temp file after conversion error: ${renameErr.message}`, renameErr);
-              resolve(null); // Give up if rename also fails
+              resolve(null);
             }        
           } finally {
-             // Clean up the temp file if it still exists (e.g., rename failed)
+            
              if (fs.existsSync(tempPath)) {
                 try { fs.unlinkSync(tempPath); } catch (e) { debugError('Error cleaning up temp file in finally block', e); }
              }
@@ -165,7 +165,7 @@ export async function downloadImage(url: string, filename: string): Promise<stri
     });
 
     request.on('timeout', () => {
-      request.destroy(); // Destroy the request explicitly on timeout
+      request.destroy();
       debugError(`Request timed out for image URL: ${processedUrl}`);
       try { fs.unlinkSync(tempPath); } catch (e) { /* ignore */ }
       resolve(null);
@@ -207,7 +207,7 @@ export async function uploadImageToDiscord(client: Client, imagePath: string | n
     
     const textChannel = channel as TextChannel;
     
-    // Ensure filename ends with .png as we convert to PNG
+   
     const pngFilename = filename.endsWith('.png') ? filename : `${filename.replace(/\.[^/.]+$/, '')}.png`;
     
     const attachment = new AttachmentBuilder(imagePath, { 

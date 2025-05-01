@@ -57,28 +57,7 @@ export const data = new SlashCommandBuilder()
       .setRequired(false)
   );
 
-// export async function translateDescription(description: string): Promise<string> {
-//   try {
-//     const { text } = await translate(description, { to: 'es' });
-//     return text;
-//   } catch (error) {
-//     console.error('Error al traducir:', error);
-//   }
-//   return '';
-// }
 
-// export async function translateDescription(description: string): Promise<string> {
-//   if (!description) {
-//     return '';
-//   }
-//   try {
-//     const text = await translateWithAutoProxy(description, 'es', 7000);
-//     return text;
-//   } catch (error) {
-//     console.error('Error al traducir con auto-proxy:', error);
-//     return '[Error en la traducción]';
-//   }
-// }
 
 export async function sendToChannel(client: Client, channelId: string, gameData: Game, imageUrl: string, linkMediafire: string, linkPixeldrain: string, type: string, gameUrl: string): Promise<void> {
   try {
