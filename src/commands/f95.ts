@@ -2,6 +2,7 @@ import { CommandInteraction, SlashCommandBuilder, EmbedBuilder, AttachmentBuilde
 import { login, Game, getHandiworkFromURL } from 'f95api'
 import { formatLink } from "../utils";
 import { config } from "../config";
+import { translate } from '@vitalets/google-translate-api';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
@@ -58,14 +59,9 @@ export const data = new SlashCommandBuilder()
   );
 
 async function translateDescription(description: string): Promise<string> {
-  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(description)}&langpair=en|es`;
-
   try {
-    const respuesta = await fetch(url);
-    const datos = await respuesta.json();
-    const traduccion = datos.responseData.translatedText;
-
-    return traduccion;
+    const { text } = await translate(description, { to: 'es' });
+    return text;
   } catch (error) {
     console.error('Error al traducir:', error);
   }
