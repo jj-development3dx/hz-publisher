@@ -57,6 +57,21 @@ export const data = new SlashCommandBuilder()
       .setRequired(false)
   );
 
+async function translateDescription(description: string): Promise<string> {
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(description)}&langpair=en|es`;
+
+  try {
+    const respuesta = await fetch(url);
+    const datos = await respuesta.json();
+    const traduccion = datos.responseData.translatedText;
+
+    return traduccion;
+  } catch (error) {
+    console.error('Error al traducir:', error);
+  }
+  return '';
+}
+
 async function downloadImage(url: string, filename: string): Promise<string | null> {
   return new Promise((resolve, reject) => {
     const debugLog = (message: string) => {
@@ -215,6 +230,54 @@ async function sendToChannel(interaction: CommandInteraction, channelId: string,
     const textChannel = channel as TextChannel;
     
     const f95zoneLink = `[Ver en F95Zone](${gameData.url || gameUrl})`;
+
+    const translateMap = {
+      "2dcg": '2d',
+      "2d game": "2d",
+      "2d": "2d",
+      "anal sex": "Anal",
+      "anal": "Anal",
+      "bdsm": "Bdsm",
+      "sci-fi": "Ciencia ficción", 
+      "mind control": "Control mental",
+      "corruption": "Corrupción",
+      "female domination": "Dominación femenina",
+      "male domination": "Dominación masculina",
+      "pregnancy": "Embarazo",
+      "slave": "Esclavo",
+      "school setting": "Escolar",
+      "fantasy": "Fantasía",
+      "furry": "Furry",
+      "futa/trans": "Futa/Trans",
+      "futa/trans protagonist": "Futa/Trans",
+      "harem": "Harem",
+      "humor": "Humor",
+      "incest": "Incesto",
+      "interracial": "Interracial",
+      "lesbian": "Lesbianas",
+      "loli": "Lol1",
+      "milf": "Milf",
+      "ntr": "Ntr",
+      "netorare": "Ntr",
+      "parody": "Parodia",
+      "female protagonist": "Protagonista femenino",
+      "male protagonist": "Protagonista masculino",
+      "romance": "Romance",
+      "rpg": "RPGM",
+      "sandbox": "Sandbox",
+      "shota": "Shota",
+      "big tits": "Tetas grandes",
+      "rape": "Violación",
+      "virgin": "Virgen",
+      "superpowers": "Superpoderes",
+      "monster girl": "Monstruo",
+      "monster": "Monstruo",
+      "gay": "Gay",
+    }
+    const translatedTags = gameData.genre
+      .filter((tag: string) => translateMap[tag.toLowerCase() as keyof typeof translateMap])
+      .map((tag: string) => translateMap[tag.toLowerCase() as keyof typeof translateMap]);
+    const translatedDescription = await translateDescription(gameData.overview || gameData.overview || '');
     
     const embed = new EmbedBuilder()
       .setAuthor({
@@ -223,11 +286,11 @@ async function sendToChannel(interaction: CommandInteraction, channelId: string,
         url: 'https://hotzone18.com/'
       })
       .setTitle(gameData.name || 'No hay nombre disponible.')
-      .setDescription(`\`\`\`\n${gameData.overview || 'No hay descripción disponible.'}\n\`\`\``)
+      .setDescription(`\`\`\`\n${translatedDescription}\n\`\`\``)
       .addFields(
         {
           name: 'Generos',
-          value: `\`\`\`\n${(gameData.genre && gameData.genre.length > 0) ? gameData.genre.toString() : 'Sin géneros'}\n\`\`\``
+          value: `\`\`\`\n${(gameData.genre && gameData.genre.length > 0) ? translatedTags.join(', ') : 'Sin géneros'}\n\`\`\``
         },
         {
           name: 'Puntuación media',
@@ -508,7 +571,13 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
         if (!config.DISCORD_PREMIUM_MOBILE_CHANNEL_ID) console.log("Falta configuración de canal para Premium Mobile");
       }
 
-      console.log(`Se enviarán mensajes a ${channelsCount} canales`);
+      if (config.DISCORD_LOGS_CHANNEL_ID) {
+        const logsChannel = interaction.client.channels.cache.get(config.DISCORD_LOGS_CHANNEL_ID) as TextChannel;
+        if (logsChannel) {
+          logsChannel.send(`El usuario ${interaction.user.username} (ID: ${interaction.user.id}) ha publicado el juego "${gameData.name}" (${gameData.url}).`);
+        }
+      }
+
       
       if (channelsCount === 0) {
         await interaction.followUp({
