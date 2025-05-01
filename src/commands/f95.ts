@@ -1,8 +1,7 @@
 import { CommandInteraction, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ChannelType, TextChannel, Client } from "discord.js";
 import { login, Game, getHandiworkFromURL } from 'f95api'
-import { formatLink } from "../utils";
+import { formatLink, downloadImage, uploadImageToDiscord } from "../utils";
 import { config } from "../config";
-import { translate } from '@vitalets/google-translate-api';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
@@ -58,155 +57,30 @@ export const data = new SlashCommandBuilder()
       .setRequired(false)
   );
 
-async function translateDescription(description: string): Promise<string> {
-  try {
-    const { text } = await translate(description, { to: 'es' });
-    return text;
-  } catch (error) {
-    console.error('Error al traducir:', error);
-  }
-  return '';
-}
+// export async function translateDescription(description: string): Promise<string> {
+//   try {
+//     const { text } = await translate(description, { to: 'es' });
+//     return text;
+//   } catch (error) {
+//     console.error('Error al traducir:', error);
+//   }
+//   return '';
+// }
 
-async function downloadImage(url: string, filename: string): Promise<string | null> {
-  return new Promise((resolve, reject) => {
-    const debugLog = (message: string) => {
-      if (config.DEBUG_MODE) {
-        console.log(`[DEBUG] ${message}`);
-      }
-    };
-    
-    const debugError = (message: string, error?: any) => {
-      if (config.DEBUG_MODE) {
-        if (error) {
-          console.error(`[DEBUG ERROR] ${message}:`, error);
-        } else {
-          console.error(`[DEBUG ERROR] ${message}`);
-        }
-      }
-    };
-    
-    const cacheDir = path.join(process.cwd(), 'cache');
-    if (!fs.existsSync(cacheDir)) {
-      fs.mkdirSync(cacheDir, { recursive: true });
-    }
-    
-    const fileBase = filename.replace(/\.[^/.]+$/, '');
-    const filePath = path.join(cacheDir, `${fileBase}.png`);
-    const tempPath = path.join(cacheDir, `${fileBase}_temp`);
-    
-    if (fs.existsSync(filePath)) {
-      debugLog(`Imagen ya en caché: ${filePath}`);
-      resolve(filePath);
-      return;
-    }
-    
-    const options = {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8'
-      }
-    };
-    
-    debugLog(`Descargando imagen desde: ${url}`);
-    
-    https.get(url, options, (response) => {
-      if (response.statusCode! < 200 || response.statusCode! >= 300) {
-        debugError(`Error descargando imagen: Status code ${response.statusCode}`);
-        reject(new Error(`Error HTTP: ${response.statusCode}`));
-        return;
-      }
-      
-      debugLog(`Respuesta recibida con status code: ${response.statusCode}`);
-      
-      const fileStream = fs.createWriteStream(tempPath);
-      
-      response.pipe(fileStream);
-      
-      fileStream.on('finish', () => {
-        fileStream.close();
-        debugLog(`Imagen temporal descargada: ${tempPath}`);
-        
-        debugLog(`Iniciando conversión a PNG con Sharp...`);
-        sharp.default(tempPath)
-          .png()
-          .toFile(filePath)
-          .then(() => {
-            fs.unlink(tempPath, (unlinkErr) => {
-              if (unlinkErr) debugError(`Error eliminando archivo temporal: ${unlinkErr.message}`);
-            });
-            
-            debugLog(`Imagen convertida a PNG: ${filePath}`);
-            resolve(filePath);
-          })
-          .catch((convErr: Error) => {
-            debugError(`Error convirtiendo imagen a PNG: ${convErr.message}`, convErr);
-            try {
-              debugLog(`Intentando usar archivo temporal sin conversión...`);
-              fs.renameSync(tempPath, filePath);
-              debugLog(`Archivo temporal renombrado a: ${filePath}`);
-              resolve(filePath);
-            } catch (renameErr: unknown) {
-              const error = renameErr instanceof Error ? renameErr : new Error(String(renameErr));
-              debugError(`Error renombrando archivo temporal: ${error.message}`, error);
-              reject(convErr);
-            }
-          });
-      });
-      
-      fileStream.on('error', (err) => {
-        fs.unlink(tempPath, () => {});
-        debugError(`Error escribiendo archivo: ${err.message}`, err);
-        reject(err);
-      });
-    }).on('error', (err) => {
-      debugError(`Error en solicitud HTTP: ${err.message}`, err);
-      reject(err);
-    });
-  });
-}
+// export async function translateDescription(description: string): Promise<string> {
+//   if (!description) {
+//     return '';
+//   }
+//   try {
+//     const text = await translateWithAutoProxy(description, 'es', 7000);
+//     return text;
+//   } catch (error) {
+//     console.error('Error al traducir con auto-proxy:', error);
+//     return '[Error en la traducción]';
+//   }
+// }
 
-async function uploadImageToDiscord(client: Client, imagePath: string, filename: string): Promise<string> {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const channel = await client.channels.fetch(config.DISCORD_IMAGES_CHANNEL_ID);
-      
-      if (!channel || channel.type !== ChannelType.GuildText) {
-        console.error('Canal de imágenes no encontrado o no es un canal de texto');
-        reject(new Error('Canal de imágenes no encontrado'));
-        return;
-      }
-      
-      const textChannel = channel as TextChannel;
-      
-      const pngFilename = filename.endsWith('.png') ? filename : `${filename.replace(/\.[^/.]+$/, '')}.png`;
-      
-      const attachment = new AttachmentBuilder(imagePath, { 
-        name: pngFilename,
-        description: "Game cover image (PNG)"
-      });
-      
-      console.log(`Subiendo imagen a canal de Discord: ${config.DISCORD_IMAGES_CHANNEL_ID}`);
-      const message = await textChannel.send({ files: [attachment] });
-      
-      if (message.attachments.size > 0) {
-        const imageUrl = message.attachments.first()?.url;
-        if (imageUrl) {
-          console.log(`Imagen subida exitosamente a Discord. URL: ${imageUrl}`);
-          resolve(imageUrl);
-          return;
-        }
-      }
-      
-      reject(new Error('No se pudo obtener la URL de la imagen subida'));
-    } catch (error) {
-      console.error('Error al subir imagen a Discord:', error);
-      reject(error);
-    }
-  });
-}
-
-async function sendToChannel(interaction: CommandInteraction, channelId: string, gameData: any, imageUrl: string, linkMediafire: string, linkPixeldrain: string, type: string, gameUrl: string): Promise<void> {
+export async function sendToChannel(client: Client, channelId: string, gameData: Game, imageUrl: string, linkMediafire: string, linkPixeldrain: string, type: string, gameUrl: string): Promise<void> {
   try {
     console.log(`Intentando enviar mensaje a canal ${type} con ID: ${channelId}`);
     console.log(`Enlaces: Mediafire=${linkMediafire}, Pixeldrain=${linkPixeldrain}`);
@@ -216,7 +90,7 @@ async function sendToChannel(interaction: CommandInteraction, channelId: string,
       return;
     }
 
-    const channel = await interaction.client.channels.fetch(channelId);
+    const channel = await client.channels.fetch(channelId);
     if (!channel || channel.type !== ChannelType.GuildText) {
       console.error(`Canal ${type} (ID: ${channelId}) no encontrado o no es un canal de texto`);
       return;
@@ -269,11 +143,11 @@ async function sendToChannel(interaction: CommandInteraction, channelId: string,
       "monster girl": "Monstruo",
       "monster": "Monstruo",
       "gay": "Gay",
-    }
+    };
+
     const translatedTags = gameData.genre
       .filter((tag: string) => translateMap[tag.toLowerCase() as keyof typeof translateMap])
       .map((tag: string) => translateMap[tag.toLowerCase() as keyof typeof translateMap]);
-    const translatedDescription = await translateDescription(gameData.overview || gameData.overview || '');
     
     const embed = new EmbedBuilder()
       .setAuthor({
@@ -282,7 +156,7 @@ async function sendToChannel(interaction: CommandInteraction, channelId: string,
         url: 'https://hotzone18.com/'
       })
       .setTitle(gameData.name || 'No hay nombre disponible.')
-      .setDescription(`\`\`\`\n${translatedDescription}\n\`\`\``)
+      .setDescription(`\`\`\`\n${gameData.overview || 'No hay descripción disponible.'}\n\`\`\``)
       .addFields(
         {
           name: 'Generos',
@@ -352,6 +226,29 @@ async function sendToChannel(interaction: CommandInteraction, channelId: string,
     
   } catch (error) {
     console.error(`Error al enviar embed de ${type}:`, error);
+  }
+}
+
+export async function sendGameEmbed(
+  client: Client,
+  channelId: string, 
+  gameData: Game, 
+  linkMediafire: string, 
+  linkPixeldrain: string, 
+  type: string, 
+  gameUrl: string,
+  imageUrl?: string
+): Promise<void> {
+  try {
+    const coverImageUrl = imageUrl || (
+      gameData.cover && typeof gameData.cover === 'string' && gameData.cover.trim()
+      ? gameData.cover.trim()
+      : 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png'
+    );
+    
+    await sendToChannel(client, channelId, gameData, coverImageUrl, linkMediafire, linkPixeldrain, type, gameUrl);
+  } catch (error) {
+    console.error(`Error al enviar embed simplificado: ${error}`);
   }
 }
 
@@ -483,12 +380,11 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
       const tasks = [];
       let channelsCount = 0;
 
-      // Free PC
       if (freePcMediafire && freePcPixeldrain && config.DISCORD_FREE_PC_CHANNEL_ID) {
         console.log("Preparando envío al canal Free PC");
         channelsCount++;
         tasks.push(sendToChannel(
-          interaction, 
+          interaction.client, 
           config.DISCORD_FREE_PC_CHANNEL_ID, 
           gameData, 
           coverImageUrl, 
@@ -504,12 +400,11 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
         if (!config.DISCORD_FREE_PC_CHANNEL_ID) console.log("Falta configuración de canal para Free PC");
       }
 
-      // Free Mobile
       if (freeMobileMediafire && freeMobilePixeldrain && config.DISCORD_FREE_MOBILE_CHANNEL_ID) {
         console.log("Preparando envío al canal Free Mobile");
         channelsCount++;
         tasks.push(sendToChannel(
-          interaction, 
+          interaction.client, 
           config.DISCORD_FREE_MOBILE_CHANNEL_ID, 
           gameData, 
           coverImageUrl, 
@@ -525,12 +420,11 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
         if (!config.DISCORD_FREE_MOBILE_CHANNEL_ID) console.log("Falta configuración de canal para Free Mobile");
       }
 
-      // Premium PC
       if (premiumPcMediafire && premiumPcPixeldrain && config.DISCORD_PREMIUM_PC_CHANNEL_ID) {
         console.log("Preparando envío al canal Premium PC");
         channelsCount++;
         tasks.push(sendToChannel(
-          interaction, 
+          interaction.client, 
           config.DISCORD_PREMIUM_PC_CHANNEL_ID, 
           gameData, 
           coverImageUrl, 
@@ -546,12 +440,11 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
         if (!config.DISCORD_PREMIUM_PC_CHANNEL_ID) console.log("Falta configuración de canal para Premium PC");
       }
 
-      // Premium Mobile
       if (premiumMobileMediafire && premiumMobilePixeldrain && config.DISCORD_PREMIUM_MOBILE_CHANNEL_ID) {
         console.log("Preparando envío al canal Premium Mobile");
         channelsCount++;
         tasks.push(sendToChannel(
-          interaction, 
+          interaction.client, 
           config.DISCORD_PREMIUM_MOBILE_CHANNEL_ID, 
           gameData, 
           coverImageUrl, 
