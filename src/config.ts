@@ -34,5 +34,5 @@ export const config = {
   DISCORD_PREMIUM_PC_CHANNEL_ID: process.env.DISCORD_PREMIUM_PC_CHANNEL_ID as string,
   DISCORD_PREMIUM_MOBILE_CHANNEL_ID: process.env.DISCORD_PREMIUM_MOBILE_CHANNEL_ID as string,
   DISCORD_LOGS_CHANNEL_ID: process.env.DISCORD_LOGS_CHANNEL_ID as string,
-  DEBUG_MODE: process.env.DEBUG_MODE === 'true' || false
+  DEBUG_MODE: process.env.DEBUG_MODE === 'true' || true
 }; 

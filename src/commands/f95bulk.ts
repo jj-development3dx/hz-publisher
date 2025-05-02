@@ -8,23 +8,18 @@ import {
   ModalSubmitInteraction, 
   ButtonBuilder, 
   ButtonStyle,
-  ComponentType,
   Client,
   ChannelType,
-  EmbedBuilder,
   TextChannel,
-  InteractionCollector,
   Interaction,
   ButtonInteraction,
-  CacheType,
   MessageFlags
 } from "discord.js";
 import { login, Game, getHandiworkFromURL } from 'f95api';
 import { config } from "../config";
-import { formatLink, downloadImage, uploadImageToDiscord } from "../utils";
+import { formatLink, safeDownloadImage, uploadImageToDiscord, ensureF95Session, cleanupTempFiles } from "../utils/utils";
 import { sendGameEmbed } from "./f95";
 import * as fs from 'fs';
-import * as path from 'path';
 
 interface GameSubmission {
   url: string;
@@ -276,261 +271,274 @@ async function handleModalSubmit(interaction: ModalSubmitInteraction, userId: st
   return null;
 }
 
-async function processGameSubmissions(client: Client, userId: string, interaction: CommandInteraction | ButtonInteraction | ModalSubmitInteraction): Promise<void> {
-  const submissions = activeSubmissions.get(userId);
-  
-  if (!submissions || submissions.length === 0) {
-    await interaction.followUp({
-      content: "No hay juegos para procesar.",
-      flags: MessageFlags.Ephemeral
-    });
-    return;
-  }
-  
-  try {
-    await interaction.followUp({
-      content: `Iniciando procesamiento de ${submissions.length} juegos...`,
-      flags: MessageFlags.Ephemeral
-    });
-  } catch(e) {
-    console.warn("Failed to send initial ephemeral processing message.");
-  }
+const listenerTimeouts = new Map<string, NodeJS.Timeout>();
 
-  let localImagePaths: string[] = [];
-  const results: ResultItem[] = [];
-  let processedCount = 0;
-  
+async function processGameSubmissions(client: Client, userId: string, interaction: CommandInteraction | ButtonInteraction | ModalSubmitInteraction): Promise<void> {
   try {
-    await login(config.F95_LOGIN_USER, config.F95_LOGIN_PASSWORD);
+    const submissions = activeSubmissions.get(userId) || [];
+    if (submissions.length === 0) {
+      await interaction.followUp({
+        content: "No hay juegos en la cola para procesar.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    await interaction.followUp({
+      content: `Procesando ${submissions.length} juegos. Esto puede tardar varios minutos...`,
+      flags: MessageFlags.Ephemeral
+    });
+
+    if (!await ensureF95Session()) {
+      await interaction.followUp({
+        content: "Error al iniciar sesión en F95Zone. Por favor, intenta de nuevo más tarde.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    let localImagePaths: string[] = [];
+    const results: ResultItem[] = [];
+    let processedCount = 0;
     
-    for (const submission of submissions) {
-      let gameName = submission.url;
-      try {
-        console.log(`[Bulk] Iniciando procesamiento para: ${submission.url}`);
-        const gameData = await getHandiworkFromURL<Game>(submission.url, Game);
-        
-        if (!gameData) {
-          console.error(`[Bulk] No se pudo obtener información del juego: ${submission.url}`);
+    try {
+      await login(config.F95_LOGIN_USER, config.F95_LOGIN_PASSWORD);
+      
+      for (const submission of submissions) {
+        let gameName = submission.url;
+        try {
+          console.log(`[Bulk] Iniciando procesamiento para: ${submission.url}`);
+          const gameData = await getHandiworkFromURL<Game>(submission.url, Game);
+          
+          if (!gameData) {
+            console.error(`[Bulk] No se pudo obtener información del juego: ${submission.url}`);
+            results.push({ 
+              ...submission,
+              name: gameName, 
+              success: false, 
+              error: "No se pudo obtener información del juego" 
+            });
+            continue;
+          }
+          
+          gameName = gameData.name || submission.url;
+          console.log(`[Bulk] Juego obtenido: ${gameName}`);
+          
+          const FALLBACK_IMAGE = 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png';
+          let coverImageUrl = FALLBACK_IMAGE;
+          let localImagePath: string | null = null;
+          
+          if (gameData.cover && typeof gameData.cover === 'string' && gameData.cover.trim()) {
+            try {
+              const originalUrl = gameData.cover.trim();
+              const filename = `bulk_game_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+              const attachmentName = `cover_game_${gameName.replace(/[^a-zA-Z0-9]/g, '') || 'game'}.png`;
+              
+              console.log(`[Bulk] Descargando imagen para ${gameName}: ${originalUrl}`);
+              localImagePath = await safeDownloadImage(originalUrl, filename);
+              console.log(`[Bulk] Imagen guardada localmente: ${localImagePath}`);
+
+              if (localImagePath) {
+                localImagePaths.push(localImagePath);
+                coverImageUrl = await uploadImageToDiscord(client, localImagePath, attachmentName);
+                console.log(`[Bulk] URL de Discord CDN obtenida para ${gameName}: ${coverImageUrl}`);
+              } else {
+                console.log(`[Bulk] Falló la descarga/conversión de imagen para ${gameName}, usando fallback.`);
+                coverImageUrl = FALLBACK_IMAGE;
+              }
+            } catch (imgError) {
+              console.error(`[Bulk] Error procesando imagen para ${gameName}:`, imgError);
+              coverImageUrl = FALLBACK_IMAGE;
+            }
+          } else {
+            console.log(`[Bulk] No se encontró URL de portada para ${gameName}, usando fallback.`);
+            coverImageUrl = FALLBACK_IMAGE;
+          }
+          console.log(`[Bulk] URL de imagen final para ${gameName}: ${coverImageUrl}`);
+          
+          const tasks = [];
+          
+          if ((submission.freePcMediafire || submission.freePcPixeldrain) && config.DISCORD_FREE_PC_CHANNEL_ID) {
+            console.log("[Bulk] Añadiendo tarea para Free PC");
+            tasks.push(sendGameToChannel(
+              client,
+              config.DISCORD_FREE_PC_CHANNEL_ID, 
+              gameData, 
+              submission.freePcMediafire, 
+              submission.freePcPixeldrain, 
+              "Versión Gratuita para PC",
+              submission.url,
+              coverImageUrl
+            ));
+          }
+          
+          if ((submission.freeMobileMediafire || submission.freeMobilePixeldrain) && config.DISCORD_FREE_MOBILE_CHANNEL_ID) {
+            console.log("[Bulk] Añadiendo tarea para Free Mobile");
+            tasks.push(sendGameToChannel(
+              client,
+              config.DISCORD_FREE_MOBILE_CHANNEL_ID, 
+              gameData, 
+              submission.freeMobileMediafire, 
+              submission.freeMobilePixeldrain, 
+              "Versión Gratuita para Móvil",
+              submission.url,
+              coverImageUrl
+            ));
+          }
+          
+          if ((submission.premiumPcMediafire || submission.premiumPcPixeldrain) && config.DISCORD_PREMIUM_PC_CHANNEL_ID) {
+            console.log("[Bulk] Añadiendo tarea para Premium PC");
+            tasks.push(sendGameToChannel(
+              client,
+              config.DISCORD_PREMIUM_PC_CHANNEL_ID, 
+              gameData, 
+              submission.premiumPcMediafire, 
+              submission.premiumPcPixeldrain, 
+              "Versión Premium para PC",
+              submission.url,
+              coverImageUrl
+            ));
+          }
+          
+          if ((submission.premiumMobileMediafire || submission.premiumMobilePixeldrain) && config.DISCORD_PREMIUM_MOBILE_CHANNEL_ID) {
+            console.log("[Bulk] Añadiendo tarea para Premium Mobile");
+            tasks.push(sendGameToChannel(
+              client,
+              config.DISCORD_PREMIUM_MOBILE_CHANNEL_ID, 
+              gameData, 
+              submission.premiumMobileMediafire, 
+              submission.premiumMobilePixeldrain, 
+              "Versión Premium para Móvil",
+              submission.url,
+              coverImageUrl
+            ));
+          }
+          
+          await Promise.all(tasks);
+          
           results.push({ 
             ...submission,
             name: gameName, 
-            success: false, 
-            error: "No se pudo obtener información del juego" 
+            success: true 
           });
-          continue;
+          console.log(`[Bulk] Procesamiento exitoso para: ${gameName}`);
+        } catch (error) {
+          console.error(`[Bulk] Error procesando juego ${gameName} (${submission.url}):`, error);
+          results.push({ 
+            ...submission,
+            name: gameName,
+            success: false, 
+            error: (error as Error).message || 'Error desconocido durante el procesamiento'
+          });
         }
-        
-        gameName = gameData.name || submission.url;
-        console.log(`[Bulk] Juego obtenido: ${gameName}`);
-        
-        const FALLBACK_IMAGE = 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png';
-        let coverImageUrl = FALLBACK_IMAGE;
-        let localImagePath: string | null = null;
-        
-        if (gameData.cover && typeof gameData.cover === 'string' && gameData.cover.trim()) {
-          try {
-            const originalUrl = gameData.cover.trim();
-            const filename = `bulk_game_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-            const attachmentName = `cover_game_${gameName.replace(/[^a-zA-Z0-9]/g, '') || 'game'}.png`;
-            
-            console.log(`[Bulk] Descargando imagen para ${gameName}: ${originalUrl}`);
-            localImagePath = await downloadImage(originalUrl, filename);
-            console.log(`[Bulk] Imagen guardada localmente: ${localImagePath}`);
 
-            if (localImagePath) {
-              localImagePaths.push(localImagePath);
-              coverImageUrl = await uploadImageToDiscord(client, localImagePath, attachmentName);
-              console.log(`[Bulk] URL de Discord CDN obtenida para ${gameName}: ${coverImageUrl}`);
-            } else {
-              console.log(`[Bulk] Falló la descarga/conversión de imagen para ${gameName}, usando fallback.`);
-              coverImageUrl = FALLBACK_IMAGE;
-            }
-          } catch (imgError) {
-            console.error(`[Bulk] Error procesando imagen para ${gameName}:`, imgError);
-            coverImageUrl = FALLBACK_IMAGE;
-          }
-        } else {
-          console.log(`[Bulk] No se encontró URL de portada para ${gameName}, usando fallback.`);
-          coverImageUrl = FALLBACK_IMAGE;
+        processedCount++;
+
+        try {
+          await interaction.followUp({
+            content: `Progreso: ${processedCount}/${submissions.length} procesados...`,
+            flags: MessageFlags.Ephemeral
+          });
+        } catch(e) {
+          console.warn(`Failed to send ephemeral progress update (${processedCount}/${submissions.length}):`, e);
         }
-        console.log(`[Bulk] URL de imagen final para ${gameName}: ${coverImageUrl}`);
-        
-        const tasks = [];
-        
-        if ((submission.freePcMediafire || submission.freePcPixeldrain) && config.DISCORD_FREE_PC_CHANNEL_ID) {
-          console.log("[Bulk] Añadiendo tarea para Free PC");
-          tasks.push(sendGameToChannel(
-            client,
-            config.DISCORD_FREE_PC_CHANNEL_ID, 
-            gameData, 
-            submission.freePcMediafire, 
-            submission.freePcPixeldrain, 
-            "Versión Gratuita para PC",
-            submission.url,
-            coverImageUrl
-          ));
+      }
+      
+    } catch (error) {
+      console.error('[Bulk] Error general durante el procesamiento del lote:', error);
+      await interaction.followUp({
+        content: `Error crítico durante el procesamiento del lote: ${(error as Error).message}`,
+        flags: MessageFlags.Ephemeral
+      });
+    } finally {
+      activeSubmissions.delete(userId);
+      
+      const successCount = results.filter(r => r.success).length;
+      const failedCount = results.filter(r => !r.success).length;
+      let userResultsMessage = '**Resumen del Lote**\n';
+      userResultsMessage += '✅ Juegos procesados con éxito: ' + successCount + '\n';
+      userResultsMessage += '❌ Juegos con errores: ' + failedCount + '\n\n';
+
+      if (successCount > 0) {
+        userResultsMessage += '**Juegos Publicados Correctamente:**\n';
+        results.filter(r => r.success)
+          .forEach(r => userResultsMessage += '- ' + r.name + ' (' + r.url + ')\n');
+        userResultsMessage += '\n';
+      }
+      
+      if (failedCount > 0) {
+        userResultsMessage += '**Errores Encontrados:**\n';
+        results.filter(r => !r.success)
+          .forEach(r => userResultsMessage += '- ' + (r.name || r.url) + ': ' + (r.error || 'Error desconocido') + '\n');
+      }
+      
+      try {
+        const chunks = [];
+        for (let i = 0; i < userResultsMessage.length; i += 1950) {
+          chunks.push(userResultsMessage.substring(i, i + 1950));
         }
-        
-        if ((submission.freeMobileMediafire || submission.freeMobilePixeldrain) && config.DISCORD_FREE_MOBILE_CHANNEL_ID) {
-          console.log("[Bulk] Añadiendo tarea para Free Mobile");
-          tasks.push(sendGameToChannel(
-            client,
-            config.DISCORD_FREE_MOBILE_CHANNEL_ID, 
-            gameData, 
-            submission.freeMobileMediafire, 
-            submission.freeMobilePixeldrain, 
-            "Versión Gratuita para Móvil",
-            submission.url,
-            coverImageUrl
-          ));
+        for (const chunk of chunks) {
+          await interaction.followUp({
+            content: chunk,
+          });
         }
-        
-        if ((submission.premiumPcMediafire || submission.premiumPcPixeldrain) && config.DISCORD_PREMIUM_PC_CHANNEL_ID) {
-          console.log("[Bulk] Añadiendo tarea para Premium PC");
-          tasks.push(sendGameToChannel(
-            client,
-            config.DISCORD_PREMIUM_PC_CHANNEL_ID, 
-            gameData, 
-            submission.premiumPcMediafire, 
-            submission.premiumPcPixeldrain, 
-            "Versión Premium para PC",
-            submission.url,
-            coverImageUrl
-          ));
-        }
-        
-        if ((submission.premiumMobileMediafire || submission.premiumMobilePixeldrain) && config.DISCORD_PREMIUM_MOBILE_CHANNEL_ID) {
-          console.log("[Bulk] Añadiendo tarea para Premium Mobile");
-          tasks.push(sendGameToChannel(
-            client,
-            config.DISCORD_PREMIUM_MOBILE_CHANNEL_ID, 
-            gameData, 
-            submission.premiumMobileMediafire, 
-            submission.premiumMobilePixeldrain, 
-            "Versión Premium para Móvil",
-            submission.url,
-            coverImageUrl
-          ));
-        }
-        
-        await Promise.all(tasks);
-        
-        results.push({ 
-          ...submission,
-          name: gameName, 
-          success: true 
-        });
-        console.log(`[Bulk] Procesamiento exitoso para: ${gameName}`);
-      } catch (error) {
-        console.error(`[Bulk] Error procesando juego ${gameName} (${submission.url}):`, error);
-        results.push({ 
-          ...submission,
-          name: gameName,
-          success: false, 
-          error: (error as Error).message || 'Error desconocido durante el procesamiento'
-        });
+      } catch (e) {
+        console.error("Failed to send final user summary:", e);
       }
 
-      processedCount++;
+      if (config.DISCORD_LOGS_CHANNEL_ID) {
+        let logMessage = '**Resumen del Lote Procesado por ' + interaction.user.username + ' (ID: ' + interaction.user.id + ')**\n';
+        logMessage += '✅ Éxito: ' + successCount + ', ❌ Fallos: ' + failedCount + '\n\n';
 
-      try {
-        await interaction.followUp({
-          content: `Progreso: ${processedCount}/${submissions.length} procesados...`,
-          flags: MessageFlags.Ephemeral
+        results.forEach(r => {
+          logMessage += '**' + (r.success ? '✅' : '❌') + ' ' + (r.name || r.url) + '**\n';
+          if (!r.success) logMessage += '   Error: ' + (r.error || 'Desconocido') + '\n';
+          if (r.freePcMediafire || r.freePcPixeldrain) logMessage += '   Free PC: ' + formatLink(r.freePcMediafire, 'MF') + ' ' + formatLink(r.freePcPixeldrain, 'PD') + '\n';
+          if (r.freeMobileMediafire || r.freeMobilePixeldrain) logMessage += '   Free Mobile: ' + formatLink(r.freeMobileMediafire, 'MF') + ' ' + formatLink(r.freeMobilePixeldrain, 'PD') + '\n';
+          if (r.premiumPcMediafire || r.premiumPcPixeldrain) logMessage += '   Premium PC: ' + formatLink(r.premiumPcMediafire, 'MF') + ' ' + formatLink(r.premiumPcPixeldrain, 'PD') + '\n';
+          if (r.premiumMobileMediafire || r.premiumMobilePixeldrain) logMessage += '   Premium Mobile: ' + formatLink(r.premiumMobileMediafire, 'MF') + ' ' + formatLink(r.premiumMobilePixeldrain, 'PD') + '\n';
+          logMessage += '   URL F95: <' + r.url + '>\n\n';
         });
-      } catch(e) {
-        console.warn(`Failed to send ephemeral progress update (${processedCount}/${submissions.length}):`, e);
+
+        try {
+          const logsChannel = await client.channels.fetch(config.DISCORD_LOGS_CHANNEL_ID);
+          if (logsChannel && logsChannel.type === ChannelType.GuildText) {
+            const logChunks = [];
+            for (let i = 0; i < logMessage.length; i += 1950) {
+              logChunks.push(logMessage.substring(i, i + 1950));
+            }
+            for (const chunk of logChunks) {
+              await (logsChannel as TextChannel).send(chunk);
+            }
+          } else {
+            console.error("[Bulk] Canal de logs no encontrado o no es de texto.");
+          }
+        } catch (error) {
+          console.error("[Bulk] Error al enviar log detallado:", error);
+        }
+      }
+
+      if (localImagePaths.length > 0) {
+        console.log(`[Bulk] Limpiando ${localImagePaths.length} imágenes cacheadas...`);
+        setTimeout(() => {
+          localImagePaths.forEach(imgPath => {
+            fs.unlink(imgPath, (err) => {
+              if (err) {
+                console.error(`[Bulk] Error al eliminar imagen cacheada ${imgPath}:`, err);
+              } else {
+                console.log(`[Bulk] Imagen eliminada: ${imgPath}`);
+              }
+            });
+          });
+        }, 5 * 1000);
       }
     }
-    
   } catch (error) {
-    console.error('[Bulk] Error general durante el procesamiento del lote:', error);
+    console.error('[Bulk] Error executing command:', error);
     await interaction.followUp({
-      content: `Error crítico durante el procesamiento del lote: ${(error as Error).message}`,
+      content: 'Ocurrió un error al iniciar el comando. Por favor, intenta de nuevo.',
       flags: MessageFlags.Ephemeral
     });
-  } finally {
-    activeSubmissions.delete(userId);
-    
-    const successCount = results.filter(r => r.success).length;
-    const failedCount = results.filter(r => !r.success).length;
-    let userResultsMessage = '**Resumen del Lote**\n';
-    userResultsMessage += '✅ Juegos procesados con éxito: ' + successCount + '\n';
-    userResultsMessage += '❌ Juegos con errores: ' + failedCount + '\n\n';
-
-    if (successCount > 0) {
-      userResultsMessage += '**Juegos Publicados Correctamente:**\n';
-      results.filter(r => r.success)
-        .forEach(r => userResultsMessage += '- ' + r.name + ' (' + r.url + ')\n');
-      userResultsMessage += '\n';
-    }
-    
-    if (failedCount > 0) {
-      userResultsMessage += '**Errores Encontrados:**\n';
-      results.filter(r => !r.success)
-        .forEach(r => userResultsMessage += '- ' + (r.name || r.url) + ': ' + (r.error || 'Error desconocido') + '\n');
-    }
-    
-    try {
-      const chunks = [];
-      for (let i = 0; i < userResultsMessage.length; i += 1950) {
-        chunks.push(userResultsMessage.substring(i, i + 1950));
-      }
-      for (const chunk of chunks) {
-        await interaction.followUp({
-          content: chunk,
-        });
-      }
-    } catch (e) {
-      console.error("Failed to send final user summary:", e);
-    }
-
-    if (config.DISCORD_LOGS_CHANNEL_ID) {
-      let logMessage = '**Resumen del Lote Procesado por ' + interaction.user.username + ' (ID: ' + interaction.user.id + ')**\n';
-      logMessage += '✅ Éxito: ' + successCount + ', ❌ Fallos: ' + failedCount + '\n\n';
-
-      results.forEach(r => {
-        logMessage += '**' + (r.success ? '✅' : '❌') + ' ' + (r.name || r.url) + '**\n';
-        if (!r.success) logMessage += '   Error: ' + (r.error || 'Desconocido') + '\n';
-        if (r.freePcMediafire || r.freePcPixeldrain) logMessage += '   Free PC: ' + formatLink(r.freePcMediafire, 'MF') + ' ' + formatLink(r.freePcPixeldrain, 'PD') + '\n';
-        if (r.freeMobileMediafire || r.freeMobilePixeldrain) logMessage += '   Free Mobile: ' + formatLink(r.freeMobileMediafire, 'MF') + ' ' + formatLink(r.freeMobilePixeldrain, 'PD') + '\n';
-        if (r.premiumPcMediafire || r.premiumPcPixeldrain) logMessage += '   Premium PC: ' + formatLink(r.premiumPcMediafire, 'MF') + ' ' + formatLink(r.premiumPcPixeldrain, 'PD') + '\n';
-        if (r.premiumMobileMediafire || r.premiumMobilePixeldrain) logMessage += '   Premium Mobile: ' + formatLink(r.premiumMobileMediafire, 'MF') + ' ' + formatLink(r.premiumMobilePixeldrain, 'PD') + '\n';
-        logMessage += '   URL F95: <' + r.url + '>\n\n';
-      });
-
-      try {
-        const logsChannel = await client.channels.fetch(config.DISCORD_LOGS_CHANNEL_ID);
-        if (logsChannel && logsChannel.type === ChannelType.GuildText) {
-          const logChunks = [];
-          for (let i = 0; i < logMessage.length; i += 1950) {
-            logChunks.push(logMessage.substring(i, i + 1950));
-          }
-          for (const chunk of logChunks) {
-            await (logsChannel as TextChannel).send(chunk);
-          }
-        } else {
-          console.error("[Bulk] Canal de logs no encontrado o no es de texto.");
-        }
-      } catch (error) {
-        console.error("[Bulk] Error al enviar log detallado:", error);
-      }
-    }
-
-    if (localImagePaths.length > 0) {
-      console.log(`[Bulk] Limpiando ${localImagePaths.length} imágenes cacheadas...`);
-      setTimeout(() => {
-        localImagePaths.forEach(imgPath => {
-          fs.unlink(imgPath, (err) => {
-            if (err) {
-              console.error(`[Bulk] Error al eliminar imagen cacheada ${imgPath}:`, err);
-            } else {
-              console.log(`[Bulk] Imagen eliminada: ${imgPath}`);
-            }
-          });
-        });
-      }, 5 * 1000);
-    }
   }
 }
 
@@ -575,7 +583,10 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
 
   try {
     if (interaction.channel?.id !== config.DISCORD_COMMAND_CHANNEL_ID) {
-      await interaction.reply({ content: "Este comando solo puede ser usado en el canal de comandos.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({
+        content: "Este comando solo puede ser usado en el canal de comandos.",
+        flags: MessageFlags.Ephemeral
+      });
       return;
     }
 
@@ -641,9 +652,8 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
       if ('customId' in i && i.customId) {
         interactionId = i.customId;
         if (!interactionId.includes(userId) && !interactionId.startsWith('game_modal_') && !interactionId.startsWith('premium_modal_')) {
-         
-         
-         
+          console.log(`[Bulk] Invalid interaction ID: ${interactionId}`);
+          return;
         }
       } else {
         return;
@@ -792,31 +802,38 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
     activeListeners.set(userId, interactionListener);
     console.log(`[Bulk] Registered listener for user ${userId}`);
 
-    setTimeout(() => {
+    if (listenerTimeouts.has(userId)) {
+      clearTimeout(listenerTimeouts.get(userId));
+      listenerTimeouts.delete(userId);
+    }
+
+    const timeoutId = setTimeout(() => {
       const currentListener = activeListeners.get(userId);
       if (currentListener === interactionListener) {
         interaction.client.removeListener('interactionCreate', currentListener);
         activeListeners.delete(userId);
+        listenerTimeouts.delete(userId);
+        
+        pendingSubmission.delete(userId);
+
         console.log(`[Bulk] Listener timed out and removed for user ${userId}`);
+        
+        cleanupTempFiles();
       }
-    }, 3600_000);
+    }, 6 * 3600_000);
+
+    listenerTimeouts.set(userId, timeoutId);
 
   } catch (error) {
     console.error('[Bulk] Error executing command:', error);
-    const errorMessage = 'Error al ejecutar el comando: ' + (error as Error).message;
+    
     try {
-      if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content: errorMessage, flags: MessageFlags.Ephemeral });
-      } else {
-        await interaction.reply({ content: errorMessage, flags: MessageFlags.Ephemeral });
-      }
+      await interaction.reply({
+        content: 'Ocurrió un error al iniciar el comando. Por favor, intenta de nuevo.',
+        flags: MessageFlags.Ephemeral
+      });
     } catch (replyError) {
-      console.error("[Bulk] Error responding with final command error:", replyError);
-    }
-    const listenerToRemove = activeListeners.get(userId);
-    if (listenerToRemove) {
-      interaction.client.removeListener('interactionCreate', listenerToRemove);
-      activeListeners.delete(userId);
+      console.error('[Bulk] Error replying to command execution error:', replyError);
     }
   }
 }

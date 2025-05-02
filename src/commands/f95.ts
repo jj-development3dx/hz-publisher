@@ -1,11 +1,8 @@
-import { CommandInteraction, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ChannelType, TextChannel, Client } from "discord.js";
-import { login, Game, getHandiworkFromURL } from 'f95api'
-import { formatLink, downloadImage, uploadImageToDiscord } from "../utils";
+import { CommandInteraction, SlashCommandBuilder, EmbedBuilder, ChannelType, TextChannel, Client } from "discord.js";
+import { Game, getHandiworkFromURL } from 'f95api'
+import { formatLink, safeDownloadImage, uploadImageToDiscord, ensureF95Session } from "../utils/utils";
 import { config } from "../config";
 import * as fs from 'fs';
-import * as path from 'path';
-import * as https from 'https';
-import * as sharp from 'sharp';
 
 export const data = new SlashCommandBuilder()
   .setName("f95")
@@ -286,7 +283,10 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
     };
 
     try {
-      await login(config.F95_LOGIN_USER, config.F95_LOGIN_PASSWORD);
+      if (!await ensureF95Session()) {
+        await interaction.editReply("Error al iniciar sesión en F95Zone. Por favor, intenta de nuevo más tarde.");
+        return;
+      }
 
       if (!await checkInteractionValid()) return;
       
@@ -322,7 +322,7 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
             const attachmentName = `cover_game.png`;
             
             console.log(`Descargando imagen: ${url}`);
-            localImagePath = await downloadImage(url, filename);
+            localImagePath = await safeDownloadImage(url, filename);
             console.log(`Imagen guardada en: ${localImagePath}`);
             
             if (localImagePath) {

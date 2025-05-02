@@ -1,9 +1,3 @@
-/**
- * Formatea un enlace para mostrarlo en Discord
- * @param url URL a formatear
- * @param label Etiqueta a mostrar
- * @returns Texto formateado para Discord
- */
 export function formatLink(url: string, label: string): string {
   if (!url) return "";
   return `[${label}](${url})`;
@@ -14,16 +8,107 @@ import * as path from 'path';
 import * as https from 'https';
 import * as sharp from 'sharp';
 import { Client, ChannelType, TextChannel, AttachmentBuilder } from 'discord.js';
-import { config } from './config';
+import { config } from '../config';
+import { login } from 'f95api';
+import { updateSession } from 'f95api/dist/src/scripts/network-helper';
 
 const FALLBACK_IMAGE = 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png';
 
-/**
- * Downloads an image from a URL, converts it to PNG, and saves it locally.
- * @param url The URL of the image to download.
- * @param filename The base filename to save the image as (without extension).
- * @returns The local file path of the downloaded PNG image, or null if failed.
- */
+let lastLoginTime = 0;
+const SESSION_REFRESH_INTERVAL = 10 * 60 * 1000;
+
+export async function ensureF95Session(): Promise<boolean> {
+  try {
+    const currentTime = Date.now();
+    
+    if (lastLoginTime === 0 || currentTime - lastLoginTime > SESSION_REFRESH_INTERVAL) {
+      console.log('F95Zone session needs refresh or initial login');
+      
+      try {
+        if (lastLoginTime > 0) {
+          console.log('Attempting to refresh existing F95Zone session...');
+          await updateSession();
+          console.log('F95Zone session refreshed successfully');
+        } else {
+          console.log('Performing initial F95Zone login...');
+          await login(config.F95_LOGIN_USER, config.F95_LOGIN_PASSWORD);
+          console.log('F95Zone login successful');
+        }
+        
+        lastLoginTime = currentTime;
+        return true;
+      } catch (error) {
+        console.error('Error during session refresh, attempting full login:', error);
+        
+        try {
+          await login(config.F95_LOGIN_USER, config.F95_LOGIN_PASSWORD);
+          console.log('F95Zone login successful after refresh failure');
+          lastLoginTime = currentTime;
+          return true;
+        } catch (loginError) {
+          console.error('Critical: F95Zone login failed:', loginError);
+          return false;
+        }
+      }
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Unexpected error in ensureF95Session:', error);
+    return false;
+  }
+}
+
+export function cleanupTempFiles(maxAge: number = 3600000): void {
+  try {
+    const cacheDir = path.join(process.cwd(), 'cache');
+    if (!fs.existsSync(cacheDir)) return;
+    
+    console.log('Cleaning up temporary files...');
+    const files = fs.readdirSync(cacheDir);
+    const currentTime = Date.now();
+    
+    for (const file of files) {
+      const filePath = path.join(cacheDir, file);
+      const stats = fs.statSync(filePath);
+      
+      if (currentTime - stats.mtimeMs > maxAge) {
+        try {
+          fs.unlinkSync(filePath);
+          console.log(`Removed old temporary file: ${file}`);
+        } catch (err) {
+          console.error(`Failed to remove temporary file ${file}:`, err);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error cleaning up temporary files:', error);
+  }
+}
+
+setInterval(() => {
+  cleanupTempFiles();
+}, 60 * 60 * 1000);
+
+export async function safeDownloadImage(url: string, filename: string): Promise<string | null> {
+  const tempPath = path.join(process.cwd(), 'cache', `${filename.replace(/\.[^/.]+$/, '')}_temp`);
+  
+  try {
+    return await downloadImage(url, filename);
+  } catch (error) {
+    console.error(`Error in downloadImage for ${url}:`, error);
+    return null;
+  } finally {
+    if (fs.existsSync(tempPath)) {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch (unlinkError) {
+        console.error(`Error deleting temp file ${tempPath}:`, unlinkError);
+      }
+    }
+  }
+}
+
 export async function downloadImage(url: string, filename: string): Promise<string | null> {
   return new Promise((resolve, reject) => {
     const debugLog = (message: string) => {
@@ -162,6 +247,13 @@ export async function downloadImage(url: string, filename: string): Promise<stri
         try { fs.unlinkSync(tempPath); } catch (e) { /* ignore */ }
         resolve(null);
       });
+
+      response.setTimeout(30000, () => {
+        console.error(`Response timeout for image URL: ${processedUrl}`);
+        fileStream.close();
+        try { fs.unlinkSync(tempPath); } catch (e) { /* ignore */ }
+        resolve(null);
+      });
     });
 
     request.on('timeout', () => {
@@ -179,13 +271,7 @@ export async function downloadImage(url: string, filename: string): Promise<stri
   });
 }
 
-/**
- * Uploads a local image file to a configured Discord channel.
- * @param client The Discord Client instance.
- * @param imagePath The local path to the image file.
- * @param filename The desired filename for the attachment in Discord.
- * @returns The Discord CDN URL of the uploaded image, or the fallback image URL if failed.
- */
+
 export async function uploadImageToDiscord(client: Client, imagePath: string | null, filename: string): Promise<string> {
   if (!imagePath) {
     console.log("No local image path provided, returning fallback image.");
