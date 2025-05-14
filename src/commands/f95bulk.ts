@@ -749,7 +749,8 @@ async function processGameSubmissions(client: Client, userId: string, interactio
               "Versión Gratuita para PC",
               submission.url,
               coverImageUrl,
-              submission.additionalParts
+              submission.additionalParts,
+              userId
             ));
           }
           
@@ -764,7 +765,8 @@ async function processGameSubmissions(client: Client, userId: string, interactio
               "Versión Gratuita para Móvil",
               submission.url,
               coverImageUrl,
-              submission.additionalParts
+              submission.additionalParts,
+              userId
             ));
           }
           
@@ -779,7 +781,8 @@ async function processGameSubmissions(client: Client, userId: string, interactio
               "Versión Premium para PC",
               submission.url,
               coverImageUrl,
-              submission.additionalParts
+              submission.additionalParts,
+              userId
             ));
           }
           
@@ -794,7 +797,8 @@ async function processGameSubmissions(client: Client, userId: string, interactio
               "Versión Premium para Móvil",
               submission.url,
               coverImageUrl,
-              submission.additionalParts
+              submission.additionalParts,
+              userId
             ));
           }
           
@@ -983,7 +987,8 @@ async function sendGameToChannel(
     premiumPcPixeldrain?: string;
     premiumMobileMediafire?: string;
     premiumMobilePixeldrain?: string;
-  }>
+  }>,
+  userId?: string
 ): Promise<void> {
   const hasMainLinks = linkMediafire || linkPixeldrain;
   const hasAdditionalLinks = additionalParts && additionalParts.some(
@@ -1015,6 +1020,16 @@ async function sendGameToChannel(
     
     const textChannel = channel as TextChannel;
     const f95zoneLink = `[Ver en F95Zone](${gameData.url || gameUrl})`;
+
+    let userTag = "HotZone Publisher";
+    if (userId) {
+      try {
+        const user = await client.users.fetch(userId);
+        userTag = `Publicado por: ${user.username} | HotZone Publisher`;
+      } catch (error) {
+        console.error(`[Bulk][${type}] Error fetching user ${userId}:`, error);
+      }
+    }
 
     const translateMap = {
       "2dcg": '2d',
@@ -1170,7 +1185,7 @@ async function sendGameToChannel(
     )
     .setColor(0x00b0f4)
     .setFooter({
-      text: 'HotZone Publisher',
+      text: userTag,
       iconURL: 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png'
     })
     .setTimestamp();

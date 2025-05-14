@@ -56,7 +56,7 @@ export const data = new SlashCommandBuilder()
 
 
 
-export async function sendToChannel(client: Client, channelId: string, gameData: Game, imageUrl: string, linkMediafire: string, linkPixeldrain: string, type: string, gameUrl: string): Promise<void> {
+export async function sendToChannel(client: Client, channelId: string, gameData: Game, imageUrl: string, linkMediafire: string, linkPixeldrain: string, type: string, gameUrl: string, userId?: string): Promise<void> {
   try {
     console.log(`Intentando enviar mensaje a canal ${type} con ID: ${channelId}`);
     console.log(`Enlaces: Mediafire=${linkMediafire}, Pixeldrain=${linkPixeldrain}`);
@@ -76,6 +76,16 @@ export async function sendToChannel(client: Client, channelId: string, gameData:
     const textChannel = channel as TextChannel;
     
     const f95zoneLink = `[Ver en F95Zone](${gameData.url || gameUrl})`;
+
+    let userTag = "HotZone Publisher";
+    if (userId) {
+      try {
+        const user = await client.users.fetch(userId);
+        userTag = `Publicado por: ${user.username} | HotZone Publisher`;
+      } catch (error) {
+        console.error(`Error fetching user ${userId}:`, error);
+      }
+    }
 
     const translateMap = {
       "2dcg": '2d',
@@ -127,7 +137,7 @@ export async function sendToChannel(client: Client, channelId: string, gameData:
     
     const embed = new EmbedBuilder()
       .setAuthor({
-        name: 'HotZone Publisher',
+        name: userTag,
         iconURL: 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png',
         url: 'https://hotzone18.com/'
       })
@@ -183,7 +193,7 @@ export async function sendToChannel(client: Client, channelId: string, gameData:
       )
       .setColor(0x00b0f4)
       .setFooter({
-        text: 'HotZone Publisher',
+        text: userTag,
         iconURL: 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png'
       })
       .setTimestamp();
@@ -213,7 +223,8 @@ export async function sendGameEmbed(
   linkPixeldrain: string, 
   type: string, 
   gameUrl: string,
-  imageUrl?: string
+  imageUrl?: string,
+  userId?: string
 ): Promise<void> {
   try {
     const coverImageUrl = imageUrl || (
@@ -222,7 +233,7 @@ export async function sendGameEmbed(
       : 'https://cdn.discordapp.com/attachments/1143524516156051456/1147920354753704096/logo.png'
     );
     
-    await sendToChannel(client, channelId, gameData, coverImageUrl, linkMediafire, linkPixeldrain, type, gameUrl);
+    await sendToChannel(client, channelId, gameData, coverImageUrl, linkMediafire, linkPixeldrain, type, gameUrl, userId);
   } catch (error) {
     console.error(`Error al enviar embed simplificado: ${error}`);
   }
@@ -370,7 +381,8 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
           freePcMediafire, 
           freePcPixeldrain, 
           "Versión Gratuita para PC",
-          url
+          url,
+          interaction.user.id
         ));
       } else {
         console.log("No se enviará al canal Free PC - Falta algún parámetro");
@@ -390,7 +402,8 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
           freeMobileMediafire, 
           freeMobilePixeldrain, 
           "Versión Gratuita para Móvil",
-          url
+          url,
+          interaction.user.id
         ));
       } else {
         console.log("No se enviará al canal Free Mobile - Falta algún parámetro");
@@ -410,7 +423,8 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
           premiumPcMediafire, 
           premiumPcPixeldrain, 
           "Versión Premium para PC",
-          url
+          url,
+          interaction.user.id
         ));
       } else {
         console.log("No se enviará al canal Premium PC - Falta algún parámetro");
@@ -430,7 +444,8 @@ export async function execute(interaction: CommandInteraction): Promise<void> {
           premiumMobileMediafire, 
           premiumMobilePixeldrain, 
           "Versión Premium para Móvil",
-          url
+          url,
+          interaction.user.id
         ));
       } else {
         console.log("No se enviará al canal Premium Mobile - Falta algún parámetro");
